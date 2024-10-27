@@ -37,6 +37,7 @@ function createMainWindow(tray: Tray) {
     skipTaskbar: true,
     maximizable: false,
     webPreferences: {
+      devTools: false,
       webviewTag: true,
       nodeIntegration: true,
     },
