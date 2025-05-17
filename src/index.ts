@@ -1,11 +1,14 @@
 import {
   app,
+  session,
   BrowserWindow,
   Menu,
   nativeImage,
   nativeTheme,
   Tray,
   globalShortcut,
+  shell,
+  systemPreferences,
 } from "electron";
 import * as path from "path";
 import * as settings from "electron-settings";
@@ -16,45 +19,30 @@ const DEFAULT_WIDTH = 400;
 let tray: Tray;
 let mainWindow: BrowserWindow;
 
+const checkMicrophonePermission = async () => {
+  const status = systemPreferences.getMediaAccessStatus("microphone");
+  if (status === "granted") return;
+
+  if (process.platform === "darwin") {
+    const granted = await systemPreferences.askForMediaAccess("microphone");
+    if (!granted) {
+      shell.openExternal(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+      );
+    }
+  } else if (process.platform === "win32") {
+    shell.openExternal("ms-settings:privacy-microphone");
+  }
+};
+
 function createTray() {
-  const tray = new Tray(
-    nativeImage.createFromPath(path.join(__dirname, "images", "icon.png"))
+  const trayIcon = nativeImage.createFromPath(
+    path.join(__dirname, "images", "icon.png"),
   );
+  const tray = new Tray(trayIcon);
   tray.on("click", toggleMainWindow);
   tray.on("right-click", showContextMenu);
   return tray;
-}
-
-function createMainWindow(tray: Tray) {
-  const mainWindow = new BrowserWindow({
-    frame: false,
-    resizable: true,
-    transparent: false,
-    show: false,
-    movable: false,
-    minimizable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    maximizable: false,
-    webPreferences: {
-      devTools: false,
-      webviewTag: true,
-      nodeIntegration: true,
-    },
-  });
-
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-
-  mainWindow.on("blur", hideMainWindow);
-  mainWindow.on("resize", handleWindowResize);
-  nativeTheme.on("updated", updateMainWindowTheme);
-
-  const menu = createContextMenu();
-  tray.on("right-click", () => {
-    tray.popUpContextMenu(menu);
-  });
-
-  return mainWindow;
 }
 
 function createContextMenu() {
@@ -87,34 +75,55 @@ function createContextMenu() {
   ]);
 }
 
+function createMainWindow(tray: Tray) {
+  const win = new BrowserWindow({
+    frame: false,
+    resizable: true,
+    transparent: false,
+    show: false,
+    movable: false,
+    minimizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    maximizable: false,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      nodeIntegration: false,
+      sandbox: false,
+      webSecurity: true, // dejá webSecurity activo
+      allowRunningInsecureContent: false,
+      contextIsolation: true,
+      devTools: false,
+    },
+  });
+
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  win.on("blur", hideMainWindow);
+  win.on("resize", handleWindowResize);
+  nativeTheme.on("updated", updateMainWindowTheme);
+
+  tray.on("right-click", () => {
+    tray.popUpContextMenu(createContextMenu());
+  });
+
+  return win;
+}
+
 async function resetMainWindowSize() {
   const trayBounds = tray.getBounds();
   const x = Math.round(trayBounds.x + trayBounds.width / 2 - DEFAULT_WIDTH / 2);
   const y = Math.round(trayBounds.y + trayBounds.height);
-  mainWindow.setBounds({
-    x,
-    y,
-    width: DEFAULT_WIDTH,
-    height: DEFAULT_HEIGHT,
-  });
+  mainWindow.setBounds({ x, y, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
   await settings.set("width", DEFAULT_WIDTH);
   await settings.set("height", DEFAULT_HEIGHT);
 }
 
 function handleWindowResize() {
   const { width, height } = mainWindow.getBounds();
-
   const trayBounds = tray.getBounds();
   const x = Math.round(trayBounds.x + trayBounds.width / 2 - width / 2);
   const y = Math.round(trayBounds.y + trayBounds.height);
-
-  mainWindow.setBounds({
-    x,
-    y,
-    width,
-    height,
-  });
-
+  mainWindow.setBounds({ x, y, width, height });
   settings.set("width", width);
   settings.set("height", height);
 }
@@ -129,28 +138,21 @@ async function showMainWindow() {
   const height = ((await settings.get("height")) as number) || DEFAULT_HEIGHT;
   const x = Math.round(trayBounds.x + trayBounds.width / 2 - width / 2);
   const y = Math.round(trayBounds.y + trayBounds.height);
-  mainWindow.setBounds({
-    x,
-    y,
-    width,
-    height,
-  });
-
+  mainWindow.setBounds({ x, y, width, height });
   mainWindow.show();
   mainWindow.focus();
-  // mainWindow.webContents.send("focus-textarea");
 }
 
-function hideMainWindow(): void {
+function hideMainWindow() {
   mainWindow.hide();
-  app.dock.hide();
+  if (process.platform === "darwin") app.dock.hide();
 }
 
 function updateMainWindowTheme() {
-  const backgroundColor = nativeTheme.shouldUseDarkColors ? "#343541" : "#FFF";
-  const textColor = nativeTheme.shouldUseDarkColors ? "#FFF" : "#000";
+  const background = nativeTheme.shouldUseDarkColors ? "#343541" : "#FFF";
+  const text = nativeTheme.shouldUseDarkColors ? "#FFF" : "#000";
   mainWindow.webContents.insertCSS(
-    `body { background-color: ${backgroundColor}; color: ${textColor}; }`
+    `body { background-color: ${background}; color: ${text}; }`,
   );
 }
 
@@ -158,54 +160,60 @@ function showContextMenu() {
   tray.popUpContextMenu(createContextMenu());
 }
 
-app.on("ready", async () => {
+app.commandLine.appendSwitch("enable-features", "WebSpeechAPI");
+app.whenReady().then(async () => {
+  // ‼️ Aprobar solicitudes de micrófono/cámara ‼️
+  session.defaultSession.setPermissionRequestHandler(
+    (_wc, permission, callback) => {
+      //@ts-ignore
+      if (permission === "wakeLock") {
+        return callback(true);
+      }
+      if (
+        permission === "clipboard-read" ||
+        permission === "clipboard-sanitized-write"
+      ) {
+        return callback(true);
+      }
+      if (
+        permission === "media" || // Electron < 24
+        //@ts-ignore
+        permission === "microphone" ||
+        //@ts-ignore
+        permission === "camera"
+      ) {
+        callback(true);
+      } else {
+        callback(false);
+      }
+    },
+  );
+
+  await checkMicrophonePermission();
+
   tray = createTray();
-  mainWindow = await createMainWindow(tray);
-  mainWindow.loadURL("https://chat.openai.com/chat/");
+  mainWindow = createMainWindow(tray);
+  mainWindow.webContents.setUserAgent(
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) " +
+      "AppleWebKit/537.36 (KHTML, like Gecko) " +
+      "Chrome/114.0.0.0 Safari/537.36",
+  );
+  await mainWindow.loadURL("https://chatgpt.com/");
   mainWindow.focus();
 
-  const jsScriptWithShorcutsMessage = `
-    var path = "/html/body/div[1]/div[2]/main/div[1]/div[1]/div/div[2]/div/div/div/div[6]/div/div";
-    
-    function updateDivContent() {
-      var style = document.createElement('style');
-      style.innerHTML = '* { cursor: default !important; }';
-      document.head.appendChild(style);
+  mainWindow.webContents.session.webRequest.onHeadersReceived(
+    (details, callback) => {
+      const headers = details.responseHeaders ?? {};
+      delete headers["content-security-policy"]; // ⚠️ menos seguro
+      callback({ responseHeaders: headers });
+    },
+  );
 
-
-      var result = document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-      var targetDiv = result.singleNodeValue;
-
-      if (targetDiv) {
-        targetDiv.textContent = "ChatGPT can make mistakes. Check important info. Press ⌘ + / for shortcuts";
-      }
-      clearTimeout(timeout);
-    }
-
-    var timeout = setTimeout(updateDivContent, 300);
-  `;
-  const webview = mainWindow.webContents;
-  webview.on("did-stop-loading", () => {
-    webview.focus();
-    webview.executeJavaScript(jsScriptWithShorcutsMessage);
-  });
-
-  // Register shortcut to open the app window
-  globalShortcut.register("Ctrl+Option+Command+C", () => {
-    toggleMainWindow();
-  });
-  // globalShortcut.register("Esc", () => {
-  //   mainWindow.hide();
-  // });
+  globalShortcut.register("Ctrl+Option+Command+C", toggleMainWindow);
 });
 
-app.on("will-quit", () => {
-  // Unregister all shortcuts
-  globalShortcut.unregisterAll();
-});
+app.on("will-quit", () => globalShortcut.unregisterAll());
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
+  if (process.platform !== "darwin") app.quit();
 });

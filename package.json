@@ -1,7 +1,7 @@
 {
   "name": "tray-chatgpt-app",
   "productName": "Tray ChatGPT",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "A tray app for ChatGPT",
   "main": "dist/index.js",
   "scripts": {
@@ -24,7 +24,18 @@
       "packagerConfig": {
         "icon": "images/icon",
         "name": "Tray ChatGPT",
-        "executableName": "Tray ChatGPT"
+        "executableName": "Tray ChatGPT",
+        "osxSign": {
+          "entitlements": "entitlements.mac.plist",
+          "entitlements-inherit": "entitlements.mac.plist",
+          "hardenedRuntime": true
+        },
+        "extendInfo": {
+          "NSMicrophoneUsageDescription": "Allow microphone access for Advanced mode of ChatGPT",
+          "NSCameraUseContinuityCameraDeviceType": [
+            "AVCaptureDeviceTypeContinuityCamera"
+          ]
+        }
       },
       "makers": [
         {
@@ -58,23 +69,23 @@
     }
   },
   "devDependencies": {
-    "@electron-forge/cli": "^6.0.0-beta.67",
-    "@electron-forge/maker-deb": "^6.0.0-beta.67",
-    "@electron-forge/maker-rpm": "^6.0.0-beta.67",
-    "@electron-forge/maker-squirrel": "^6.0.0-beta.67",
-    "@electron-forge/maker-zip": "^6.0.0-beta.67",
-    "@types/sharp": "^0.31.1",
-    "@typescript-eslint/eslint-plugin": "^5.0.0",
-    "@typescript-eslint/parser": "^5.0.0",
-    "electron": "23.1.0",
-    "eslint": "^8.0.1",
-    "eslint-plugin-import": "^2.25.0",
-    "typescript": "~4.5.4"
+    "@electron-forge/cli": "^7.6.0",
+    "@electron-forge/maker-deb": "^7.6.0",
+    "@electron-forge/maker-rpm": "^7.6.0",
+    "@electron-forge/maker-squirrel": "^7.6.0",
+    "@electron-forge/maker-zip": "^7.6.0",
+    "@types/sharp": "^0.32.0",
+    "@typescript-eslint/eslint-plugin": "^8.17.0",
+    "@typescript-eslint/parser": "^8.17.0",
+    "electron": "^36.2.1",
+    "eslint": "^9.16.0",
+    "eslint-plugin-import": "^2.31.0",
+    "typescript": "~5.7.2"
   },
   "dependencies": {
-    "@electron-forge/maker-dmg": "^6.0.5",
-    "electron-settings": "^4.0.2",
-    "electron-squirrel-startup": "^1.0.0"
+    "@electron-forge/maker-dmg": "^7.6.0",
+    "electron-settings": "^4.0.4",
+    "electron-squirrel-startup": "^1.0.1"
   },
   "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }

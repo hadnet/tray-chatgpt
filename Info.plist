@@ -1,0 +1,5 @@
+<key>NSMicrophoneUsageDescription</key>
+<<key>NSCameraUseContinuityCameraDeviceType</key>
+<array>
+  <string>AVCaptureDeviceTypeContinuityCamera</string>
+</array>string>Allow ChatGPT to access your microphone</string>
