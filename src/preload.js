@@ -10,13 +10,13 @@
 //   }
 // })();
 // --- preload.js
-window.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && e.shiftKey) {
-    e.preventDefault();
-    const btn = document.getElementById("composer-submit-button");
-    if (btn) btn.click();
-  }
-});
+// window.addEventListener("keydown", (e) => {
+//   if (e.key === "Enter" && e.shiftKey) {
+//     e.preventDefault();
+//     const btn = document.getElementById("composer-submit-button");
+//     if (btn) btn.click();
+//   }
+// });
 
 // wait for the React app to mount & patch the warning text
 window.addEventListener("DOMContentLoaded", () => {
