@@ -13,7 +13,8 @@ This is a simple desktop app tray for [ChatGPT](https://chat.openai.com/chat).
 ### Keyboard Shortcuts:
 
 - Hotkey: `Ctrl+Option+Command+C`
-- Quit: `Command+Q`
+- Temporary Chat: `Command+T`
+- Quit: `Command+Q` or `ESC`
 - Reload: `Command+R`
 - Toggle Full Screen: `Ctrl+Command+F`
 
