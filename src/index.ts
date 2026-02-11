@@ -27,32 +27,32 @@ let tray: Tray;
 let mainWindow: BrowserWindow;
 
 /* ──────────────────────────────────────────────
-   1. PERFIL DO CHROME COMPARTILHADO COM ELECTRON
-   ────────────────────────────────────────────── */
+  1. CHROME PROFILE SHARED WITH ELECTRON
+────────────────────────────────────────────── */
 
 const CHROME_PROFILE_NAME = process.env.CHROME_PROFILE ?? "Default";
 
 const chromeProfilePath =
   process.platform === "darwin"
     ? path.join(
-        os.homedir(),
-        "Library/Application Support/Google/Chrome",
-        CHROME_PROFILE_NAME,
-      )
+      os.homedir(),
+      "Library/Application Support/Google/Chrome",
+      CHROME_PROFILE_NAME,
+    )
     : process.platform === "win32"
       ? path.join(
-          os.homedir(),
-          "AppData/Local/Google/Chrome/User Data",
-          CHROME_PROFILE_NAME,
-        )
+        os.homedir(),
+        "AppData/Local/Google/Chrome/User Data",
+        CHROME_PROFILE_NAME,
+      )
       : path.join(os.homedir(), ".config/google-chrome", CHROME_PROFILE_NAME);
 
 app.setPath("userData", chromeProfilePath);
 
 /* ──────────────────────────────────────────────
-   2. (Opcional) Login Google externo – útil apenas
-      se o usuário ainda não estiver logado no Chrome
-   ────────────────────────────────────────────── */
+  2. (OPTIONAL) EXTERNAL GOOGLE LOGIN
+  Useful only if the user is not yet logged into Chrome
+────────────────────────────────────────────── */
 const oauth = new ElectronGoogleOAuth2(
   GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET,
@@ -72,8 +72,8 @@ const oauth = new ElectronGoogleOAuth2(
 // }
 
 /* ──────────────────────────────────────────────
-   3. CHECKS DE PERMISSÃO (inalterados)
-   ────────────────────────────────────────────── */
+  3. PERMISSION CHECKS (unchanged)
+────────────────────────────────────────────── */
 const checkMicrophonePermission = async () => {
   const status = systemPreferences.getMediaAccessStatus("microphone");
   if (status === "granted") return;
@@ -90,8 +90,8 @@ const checkMicrophonePermission = async () => {
 };
 
 /* ──────────────────────────────────────────────
-   4. CRIAÇÃO DE TRAY E JANELA (inalterados)
-   ────────────────────────────────────────────── */
+  4. TRAY AND WINDOW CREATION (unchanged)
+────────────────────────────────────────────── */
 function createTray() {
   const trayIcon = nativeImage.createFromPath(
     path.join(__dirname, "images", "icon.png"),
@@ -146,13 +146,19 @@ function createMainWindow(tray: Tray) {
       webSecurity: true,
       allowRunningInsecureContent: false,
       contextIsolation: true,
-      devTools: false,
+      devTools: !app.isPackaged,
     },
   });
 
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.on("blur", hideMainWindow);
   win.on("resize", handleWindowResize);
+  win.webContents.on("before-input-event", (event, input) => {
+    if (input.type === "keyDown" && input.key === "Escape") {
+      event.preventDefault();
+      hideMainWindow();
+    }
+  });
   nativeTheme.on("updated", updateMainWindowTheme);
   tray.on("right-click", () => tray.popUpContextMenu(createContextMenu()));
   return win;
@@ -200,7 +206,7 @@ function updateMainWindowTheme() {
   const background = nativeTheme.shouldUseDarkColors ? "#343541" : "#FFF";
   const text = nativeTheme.shouldUseDarkColors ? "#FFF" : "#000";
   mainWindow.webContents.insertCSS(
-    `body { background-color: ${background}; color: ${text}; }`,
+    `body { background-color: ${background}; color: ${text}; margin: 0; border-radius: 80px; -electron-corner-smoothing: system-ui; overflow: hidden; }`,
   );
 }
 function showContextMenu() {
@@ -208,20 +214,20 @@ function showContextMenu() {
 }
 
 /* ──────────────────────────────────────────────
-   5. APP LIFECYCLE
-   ────────────────────────────────────────────── */
+  5. APP LIFECYCLE
+────────────────────────────────────────────── */
 app.commandLine.appendSwitch("enable-features", "WebSpeechAPI");
 
 app.whenReady().then(async () => {
   await checkMicrophonePermission();
 
-  // (Opcional) login Google externo — pode comentar se não precisar
+  // (Optional) external Google login — can be commented out if not needed
   // await ensureGoogleLogged();
 
   tray = createTray();
   mainWindow = createMainWindow(tray);
 
-  // depois de criar mainWindow:
+  // after creating mainWindow:
   const CHROME_UA =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) " +
     "AppleWebKit/537.36 (KHTML, like Gecko) " +
@@ -229,15 +235,116 @@ app.whenReady().then(async () => {
 
   const ORIGINAL_UA = mainWindow.webContents.getUserAgent();
 
-  /* troca dinâmica de User‑Agent (somente no main frame) */
+  let isTemporaryChatEnabled = true;
+
+  const toggleTemporaryChatButton = async () => {
+    try {
+      const clicked = await mainWindow.webContents.executeJavaScript(`
+        new Promise((resolve) => {
+          const TIMEOUT = 10000;
+          const INTERVAL = 250;
+          const MAX_ATTEMPTS = Math.ceil(TIMEOUT / INTERVAL);
+          let attempts = 0;
+
+          const findToggleButton = () => {
+            const exactMatch = document.querySelector(
+              'button[aria-label="Turn on temporary chat"], button[aria-label="Turn off temporary chat"]',
+            );
+            if (exactMatch) return exactMatch;
+
+            return Array.from(document.querySelectorAll("button")).find((btn) => {
+              const aria = (btn.getAttribute("aria-label") || "").toLowerCase();
+              const text = (btn.textContent || "").toLowerCase();
+              return aria.includes("temporary chat") || text.includes("temporary chat");
+            });
+          };
+
+          const tryClick = () => {
+            const btn = findToggleButton();
+            if (!btn) return false;
+            btn.click();
+            return true;
+          };
+
+          if (tryClick()) {
+            resolve(true);
+            return;
+          }
+
+          const timer = setInterval(() => {
+            attempts += 1;
+            if (tryClick()) {
+              clearInterval(timer);
+              resolve(true);
+              return;
+            }
+            if (attempts >= MAX_ATTEMPTS) {
+              clearInterval(timer);
+              resolve(false);
+            }
+          }, INTERVAL);
+        });
+      `);
+      return Boolean(clicked);
+    } catch (err) {
+      console.error("Error toggling temp-chat button:", err);
+      return false;
+    }
+  };
+
+  const triggerTemporaryChatButton = () => {
+    mainWindow.webContents
+      .executeJavaScript(`
+        (function() {
+          const SELECTOR = 'button[aria-label="Turn on temporary chat"]';
+          const TIMEOUT = 30000;
+          const INTERVAL = 250;
+          const MAX_ATTEMPTS = Math.ceil(TIMEOUT / INTERVAL);
+          let attempts = 0;
+
+          const clickIfNeeded = () => {
+            const btn = document.querySelector(SELECTOR);
+            if (!btn) return false;
+            btn.click();
+            return true;
+          };
+
+          // If already rendered, click immediately.
+          if (clickIfNeeded()) return;
+
+          // Poll while app shell/hydration is still rendering.
+          const timer = setInterval(() => {
+            attempts += 1;
+            if (clickIfNeeded() || attempts >= MAX_ATTEMPTS) {
+              clearInterval(timer);
+            }
+          }, INTERVAL);
+        })();
+      `)
+      .catch((err) => console.error("Error clicking temp-chat button:", err));
+  };
+
+  const applyTemporaryChatIfEnabled = () => {
+    if (!isTemporaryChatEnabled) return;
+    triggerTemporaryChatButton();
+  };
+
+  const toggleTemporaryChat = async () => {
+    const clicked = await toggleTemporaryChatButton();
+    // if (!clicked) {
+    //   console.warn("Temporary chat toggle button was not found in time.");
+    // }
+  };
+
+  /* Dynamic User-Agent switching (main frame only) */
   mainWindow.webContents.on(
     "did-start-navigation",
     (_event, url, _isInPlace, _isMainFrame, frameProcessId, frameRoutingId) => {
-      // só troca no frame principal
+      // only switch in the main frame
       if (!_isMainFrame) return;
 
       if (url.startsWith("https://accounts.google.com/")) {
-        // Google Sign‑in → UA original
+        // Google Sign‑in → original UA
         mainWindow.webContents.setUserAgent(ORIGINAL_UA);
       } else if (
         url.startsWith("https://chat.openai.com/") ||
@@ -248,6 +355,24 @@ app.whenReady().then(async () => {
       }
     },
   );
+
+  // Register before initial navigation so first app start is covered.
+  mainWindow.webContents.on("did-finish-load", applyTemporaryChatIfEnabled);
+  mainWindow.webContents.on("did-navigate-in-page", applyTemporaryChatIfEnabled);
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    const isCmdOrCtrlT =
+      input.type === "keyDown" &&
+      input.key.toLowerCase() === "t" &&
+      (input.meta || input.control) &&
+      !input.shift &&
+      !input.alt;
+
+    if (!isCmdOrCtrlT) return;
+
+    event.preventDefault();
+    toggleTemporaryChat();
+  });
+
   await mainWindow.loadURL("https://chatgpt.com/");
   showMainWindow();
 
