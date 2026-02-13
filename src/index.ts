@@ -35,16 +35,16 @@ const CHROME_PROFILE_NAME = process.env.CHROME_PROFILE ?? "Default";
 const chromeProfilePath =
   process.platform === "darwin"
     ? path.join(
-      os.homedir(),
-      "Library/Application Support/Google/Chrome",
-      CHROME_PROFILE_NAME,
-    )
-    : process.platform === "win32"
-      ? path.join(
         os.homedir(),
-        "AppData/Local/Google/Chrome/User Data",
+        "Library/Application Support/Google/Chrome",
         CHROME_PROFILE_NAME,
       )
+    : process.platform === "win32"
+      ? path.join(
+          os.homedir(),
+          "AppData/Local/Google/Chrome/User Data",
+          CHROME_PROFILE_NAME,
+        )
       : path.join(os.homedir(), ".config/google-chrome", CHROME_PROFILE_NAME);
 
 app.setPath("userData", chromeProfilePath);
@@ -292,42 +292,44 @@ app.whenReady().then(async () => {
     }
   };
 
-  const triggerTemporaryChatButton = () => {
-    mainWindow.webContents
-      .executeJavaScript(`
-        (function() {
-          const SELECTOR = 'button[aria-label="Turn on temporary chat"]';
-          const TIMEOUT = 30000;
-          const INTERVAL = 250;
-          const MAX_ATTEMPTS = Math.ceil(TIMEOUT / INTERVAL);
-          let attempts = 0;
+  // const triggerTemporaryChatButton = () => {
+  //   mainWindow.webContents
+  //     .executeJavaScript(
+  //       `
+  //       (function() {
+  //         const SELECTOR = 'button[aria-label="Turn on temporary chat"]';
+  //         const TIMEOUT = 30000;
+  //         const INTERVAL = 250;
+  //         const MAX_ATTEMPTS = Math.ceil(TIMEOUT / INTERVAL);
+  //         let attempts = 0;
+  //
+  //         const clickIfNeeded = () => {
+  //           const btn = document.querySelector(SELECTOR);
+  //           if (!btn) return false;
+  //           btn.click();
+  //           return true;
+  //         };
+  //
+  //         // If already rendered, click immediately.
+  //         if (clickIfNeeded()) return;
+  //
+  //         // Poll while app shell/hydration is still rendering.
+  //         const timer = setInterval(() => {
+  //           attempts += 1;
+  //           if (clickIfNeeded() || attempts >= MAX_ATTEMPTS) {
+  //             clearInterval(timer);
+  //           }
+  //         }, INTERVAL);
+  //       })();
+  //     `,
+  //     )
+  //     .catch((err) => console.error("Error clicking temp-chat button:", err));
+  // };
 
-          const clickIfNeeded = () => {
-            const btn = document.querySelector(SELECTOR);
-            if (!btn) return false;
-            btn.click();
-            return true;
-          };
-
-          // If already rendered, click immediately.
-          if (clickIfNeeded()) return;
-
-          // Poll while app shell/hydration is still rendering.
-          const timer = setInterval(() => {
-            attempts += 1;
-            if (clickIfNeeded() || attempts >= MAX_ATTEMPTS) {
-              clearInterval(timer);
-            }
-          }, INTERVAL);
-        })();
-      `)
-      .catch((err) => console.error("Error clicking temp-chat button:", err));
-  };
-
-  const applyTemporaryChatIfEnabled = () => {
-    if (!isTemporaryChatEnabled) return;
-    triggerTemporaryChatButton();
-  };
+  // const applyTemporaryChatIfEnabled = () => {
+  //   if (!isTemporaryChatEnabled) return;
+  //   triggerTemporaryChatButton();
+  // };
 
   const toggleTemporaryChat = async () => {
     const clicked = await toggleTemporaryChatButton();
@@ -357,8 +359,8 @@ app.whenReady().then(async () => {
   );
 
   // Register before initial navigation so first app start is covered.
-  mainWindow.webContents.on("did-finish-load", applyTemporaryChatIfEnabled);
-  mainWindow.webContents.on("did-navigate-in-page", applyTemporaryChatIfEnabled);
+  // mainWindow.webContents.on("did-finish-load", applyTemporaryChatIfEnabled);
+  // mainWindow.webContents.on("did-navigate-in-page", applyTemporaryChatIfEnabled);
   mainWindow.webContents.on("before-input-event", (event, input) => {
     const isCmdOrCtrlT =
       input.type === "keyDown" &&
