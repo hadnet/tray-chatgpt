@@ -26,9 +26,11 @@ const DEFAULT_WIDTH = 400;
 const DRAG_CHANNEL_START = "window-drag:start";
 const DRAG_CHANNEL_MOVE = "window-drag:move";
 const DRAG_CHANNEL_END = "window-drag:end";
+const VISIBLE_ON_CURRENT_SPACE_OPTIONS = { visibleOnFullScreen: true };
 
 let tray: Tray;
 let mainWindow: BrowserWindow;
+let resetWorkspaceVisibilityTimer: ReturnType<typeof setTimeout> | undefined;
 let dragState:
   | {
       cursorX: number;
@@ -120,7 +122,7 @@ function createContextMenu() {
     {
       label: "Close Window",
       accelerator: "Esc",
-      click: () => mainWindow.hide(),
+      click: () => hideMainWindow(),
     },
     {
       label: "Reload",
@@ -162,7 +164,6 @@ function createMainWindow(tray: Tray) {
     },
   });
 
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.on("blur", hideMainWindow);
   win.on("resize", handleWindowResize);
   win.webContents.on("before-input-event", (event, input) => {
@@ -207,13 +208,47 @@ async function showMainWindow() {
     width,
     height,
   });
-  mainWindow.show();
-  mainWindow.focus();
+  showMainWindowOnCurrentSpace();
 }
 function hideMainWindow() {
   dragState = undefined;
+  clearWorkspaceVisibilityReset();
+  if (process.platform === "darwin") {
+    mainWindow.setVisibleOnAllWorkspaces(
+      false,
+      VISIBLE_ON_CURRENT_SPACE_OPTIONS,
+    );
+  }
   mainWindow.hide();
   if (process.platform === "darwin") app.dock.hide();
+}
+function clearWorkspaceVisibilityReset() {
+  if (!resetWorkspaceVisibilityTimer) return;
+
+  clearTimeout(resetWorkspaceVisibilityTimer);
+  resetWorkspaceVisibilityTimer = undefined;
+}
+function showMainWindowOnCurrentSpace() {
+  if (process.platform !== "darwin") {
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+
+  clearWorkspaceVisibilityReset();
+  mainWindow.setVisibleOnAllWorkspaces(true, VISIBLE_ON_CURRENT_SPACE_OPTIONS);
+  mainWindow.show();
+  mainWindow.focus();
+
+  resetWorkspaceVisibilityTimer = setTimeout(() => {
+    resetWorkspaceVisibilityTimer = undefined;
+    if (mainWindow.isDestroyed()) return;
+
+    mainWindow.setVisibleOnAllWorkspaces(
+      false,
+      VISIBLE_ON_CURRENT_SPACE_OPTIONS,
+    );
+  }, 100);
 }
 function updateMainWindowTheme() {
   const background = nativeTheme.shouldUseDarkColors ? "#343541" : "#FFF";
