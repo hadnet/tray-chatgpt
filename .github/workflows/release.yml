@@ -59,6 +59,9 @@ jobs:
           node-version: 22
           cache: yarn
 
+      - name: Enable Corepack
+        run: corepack enable
+
       - name: Install Linux package dependencies
         if: runner.os == 'Linux'
         run: |
@@ -66,7 +69,7 @@ jobs:
           sudo apt-get install -y fakeroot rpm libsecret-1-dev
 
       - name: Install dependencies
-        run: yarn install --frozen-lockfile
+        run: yarn install --immutable
 
       - name: Build Electron installers
         run: yarn make --arch=x64
