@@ -26,8 +26,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         with:
-          release-type: node
-          package-name: tray-chatgpt-app
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
 
   build-installers:
     name: Build ${{ matrix.platform }} x64 installer
