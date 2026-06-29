@@ -2,6 +2,7 @@ import {
   app,
   screen,
   BrowserWindow,
+  ipcMain,
   Menu,
   nativeImage,
   nativeTheme,
@@ -22,9 +23,20 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
 
 const DEFAULT_HEIGHT = 800;
 const DEFAULT_WIDTH = 400;
+const DRAG_CHANNEL_START = "window-drag:start";
+const DRAG_CHANNEL_MOVE = "window-drag:move";
+const DRAG_CHANNEL_END = "window-drag:end";
 
 let tray: Tray;
 let mainWindow: BrowserWindow;
+let dragState:
+  | {
+      cursorX: number;
+      cursorY: number;
+      windowX: number;
+      windowY: number;
+    }
+  | undefined;
 
 /* ──────────────────────────────────────────────
   1. CHROME PROFILE SHARED WITH ELECTRON
@@ -134,7 +146,7 @@ function createMainWindow(tray: Tray) {
     resizable: true,
     transparent: false,
     show: false,
-    movable: false,
+    movable: true,
     minimizable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
@@ -191,7 +203,7 @@ async function showMainWindow() {
   const { workArea } = screen.getPrimaryDisplay();
   mainWindow.setBounds({
     x: Math.round(workArea.x + (workArea.width - width) / 2),
-    y: Math.round(workArea.y + 50),
+    y: Math.round(workArea.y + (workArea.height - height) / 2),
     width,
     height,
   });
@@ -199,6 +211,7 @@ async function showMainWindow() {
   mainWindow.focus();
 }
 function hideMainWindow() {
+  dragState = undefined;
   mainWindow.hide();
   if (process.platform === "darwin") app.dock.hide();
 }
@@ -388,6 +401,28 @@ app.whenReady().then(async () => {
   );
 
   globalShortcut.register("Ctrl+Option+Command+C", toggleMainWindow);
+});
+
+ipcMain.on(DRAG_CHANNEL_START, () => {
+  if (!mainWindow?.isVisible()) return;
+
+  const { x: cursorX, y: cursorY } = screen.getCursorScreenPoint();
+  const [windowX, windowY] = mainWindow.getPosition();
+  dragState = { cursorX, cursorY, windowX, windowY };
+});
+
+ipcMain.on(DRAG_CHANNEL_MOVE, () => {
+  if (!dragState || !mainWindow?.isVisible()) return;
+
+  const { x, y } = screen.getCursorScreenPoint();
+  mainWindow.setPosition(
+    dragState.windowX + x - dragState.cursorX,
+    dragState.windowY + y - dragState.cursorY,
+  );
+});
+
+ipcMain.on(DRAG_CHANNEL_END, () => {
+  dragState = undefined;
 });
 
 app.on("will-quit", () => globalShortcut.unregisterAll());
