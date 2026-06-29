@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.0](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.1.1...tray-chatgpt-app-v3.2.0) (2026-06-29)
+
+
+### Features
+
+* add customizable keyboard shortcuts ([117a03d](https://github.com/hadnet/tray-chatgpt/commit/117a03d1440c7249b336cb9bdc2cb62e33bded23))
+
 ## [3.1.1](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.1.0...tray-chatgpt-app-v3.1.1) (2026-06-29)
 
 
