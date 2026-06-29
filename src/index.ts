@@ -2,7 +2,10 @@ import {
   app,
   screen,
   BrowserWindow,
+  BrowserWindowConstructorOptions,
   ipcMain,
+  Input,
+  IpcMainInvokeEvent,
   Menu,
   nativeImage,
   nativeTheme,
@@ -27,9 +30,46 @@ const DRAG_CHANNEL_START = "window-drag:start";
 const DRAG_CHANNEL_MOVE = "window-drag:move";
 const DRAG_CHANNEL_END = "window-drag:end";
 const VISIBLE_ON_CURRENT_SPACE_OPTIONS = { visibleOnFullScreen: true };
+const SETTINGS_CHANNEL_GET = "settings:get-shortcuts";
+const SETTINGS_CHANNEL_SAVE = "settings:save-shortcuts";
+const SETTINGS_CHANNEL_RESET = "settings:reset-shortcuts";
+const SHORTCUT_SETTINGS_KEY = "shortcuts";
+const SHORTCUT_DEFAULTS = {
+  openApp: "Ctrl+Option+Command+C",
+  temporaryChat: "CommandOrControl+T",
+} as const;
+const MODIFIER_ALIASES: Record<string, string> = {
+  alt: "Alt",
+  option: "Option",
+  control: "Ctrl",
+  ctrl: "Ctrl",
+  command: "Command",
+  cmd: "Command",
+  meta: "Command",
+  super: "Super",
+  shift: "Shift",
+  commandorcontrol: "CommandOrControl",
+  cmdorctrl: "CommandOrControl",
+};
+const MODIFIER_ORDER = [
+  "CommandOrControl",
+  "Ctrl",
+  "Control",
+  "Option",
+  "Alt",
+  "Shift",
+  "Command",
+  "Super",
+];
+
+type ShortcutAction = keyof typeof SHORTCUT_DEFAULTS;
+type ShortcutConfig = Record<ShortcutAction, string>;
 
 let tray: Tray;
 let mainWindow: BrowserWindow;
+let settingsWindow: BrowserWindow | undefined;
+let shortcutConfig: ShortcutConfig = { ...SHORTCUT_DEFAULTS };
+let toggleTemporaryChatHandler: (() => void | Promise<void>) | undefined;
 let resetWorkspaceVisibilityTimer: ReturnType<typeof setTimeout> | undefined;
 let dragState:
   | {
@@ -103,6 +143,149 @@ const checkMicrophonePermission = async () => {
   }
 };
 
+function normalizeKeyName(key: string) {
+  const namedKeys: Record<string, string> = {
+    " ": "Space",
+    arrowdown: "Down",
+    arrowleft: "Left",
+    arrowright: "Right",
+    arrowup: "Up",
+    esc: "Escape",
+    plus: "Plus",
+    return: "Enter",
+  };
+  const normalized = namedKeys[key.toLowerCase()] ?? key;
+  if (normalized.length === 1) return normalized.toUpperCase();
+  return normalized[0].toUpperCase() + normalized.slice(1);
+}
+
+function normalizeAccelerator(value: unknown) {
+  if (typeof value !== "string") return undefined;
+
+  const parts = value
+    .split("+")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return undefined;
+
+  const modifiers = new Set<string>();
+  let key: string | undefined;
+
+  for (const part of parts) {
+    const modifier = MODIFIER_ALIASES[part.toLowerCase()];
+    if (modifier) {
+      modifiers.add(modifier);
+      continue;
+    }
+    if (key) return undefined;
+    key = normalizeKeyName(part);
+  }
+
+  if (!key || modifiers.size === 0) return undefined;
+
+  return [
+    ...MODIFIER_ORDER.filter((modifier) => modifiers.has(modifier)),
+    key,
+  ].join("+");
+}
+
+function normalizeShortcutConfig(value: unknown): ShortcutConfig | undefined {
+  if (!value || typeof value !== "object") return undefined;
+
+  const source = value as Partial<Record<ShortcutAction, unknown>>;
+  const openApp = normalizeAccelerator(source.openApp);
+  const temporaryChat = normalizeAccelerator(source.temporaryChat);
+  if (!openApp || !temporaryChat || openApp === temporaryChat) {
+    return undefined;
+  }
+
+  return { openApp, temporaryChat };
+}
+
+async function loadShortcutConfig() {
+  const saved = await settings.get(SHORTCUT_SETTINGS_KEY);
+  shortcutConfig = normalizeShortcutConfig(saved) ?? { ...SHORTCUT_DEFAULTS };
+  await settings.set(SHORTCUT_SETTINGS_KEY, shortcutConfig);
+}
+
+async function saveShortcutConfig(nextConfig: ShortcutConfig) {
+  await settings.set(SHORTCUT_SETTINGS_KEY, nextConfig);
+  shortcutConfig = nextConfig;
+  updateSettingsWindowShortcuts();
+}
+
+function registerOpenAppShortcut(
+  nextAccelerator: string,
+  previousAccelerator = shortcutConfig.openApp,
+) {
+  if (globalShortcut.isRegistered(previousAccelerator)) {
+    globalShortcut.unregister(previousAccelerator);
+  }
+  if (
+    previousAccelerator !== nextAccelerator &&
+    globalShortcut.isRegistered(nextAccelerator)
+  ) {
+    globalShortcut.unregister(nextAccelerator);
+  }
+
+  const didRegister = globalShortcut.register(nextAccelerator, toggleMainWindow);
+  if (!didRegister) {
+    globalShortcut.register(previousAccelerator, toggleMainWindow);
+  }
+
+  return didRegister;
+}
+
+function acceleratorMatchesInput(
+  accelerator: string,
+  input: Input,
+) {
+  if (input.type !== "keyDown") return false;
+
+  const parts = normalizeAccelerator(accelerator)?.split("+");
+  if (!parts) return false;
+
+  const key = parts[parts.length - 1];
+  const modifiers = new Set(parts.slice(0, -1));
+  const commandOrControlPressed = input.meta || input.control;
+
+  if (modifiers.has("CommandOrControl") && !commandOrControlPressed) {
+    return false;
+  }
+  if (!modifiers.has("CommandOrControl") && (input.meta || input.control)) {
+    const expectedCommand = modifiers.has("Command");
+    const expectedControl = modifiers.has("Ctrl") || modifiers.has("Control");
+    if (input.meta !== expectedCommand || input.control !== expectedControl) {
+      return false;
+    }
+  }
+  if (modifiers.has("Command") && !input.meta) return false;
+  if ((modifiers.has("Ctrl") || modifiers.has("Control")) && !input.control) {
+    return false;
+  }
+  if ((modifiers.has("Alt") || modifiers.has("Option")) !== input.alt) {
+    return false;
+  }
+  if (modifiers.has("Shift") !== input.shift) return false;
+
+  return normalizeKeyName(input.key) === key;
+}
+
+function getShortcutSettingsPayload() {
+  return {
+    shortcuts: shortcutConfig,
+    defaults: SHORTCUT_DEFAULTS,
+  };
+}
+
+function updateSettingsWindowShortcuts() {
+  if (!settingsWindow || settingsWindow.isDestroyed()) return;
+  settingsWindow.webContents.send(
+    "settings:shortcuts-updated",
+    getShortcutSettingsPayload(),
+  );
+}
+
 /* ──────────────────────────────────────────────
   4. TRAY AND WINDOW CREATION (unchanged)
 ────────────────────────────────────────────── */
@@ -118,7 +301,16 @@ function createTray() {
 
 function createContextMenu() {
   return Menu.buildFromTemplate([
-    { label: "Quit", accelerator: "CmdOrCtrl+Q", click: () => app.quit() },
+    {
+      label: "Open Tray ChatGPT",
+      accelerator: shortcutConfig.openApp,
+      click: () => showMainWindow(),
+    },
+    {
+      label: "Settings",
+      click: () => showSettingsWindow(),
+    },
+    { type: "separator" },
     {
       label: "Close Window",
       accelerator: "Esc",
@@ -139,6 +331,8 @@ function createContextMenu() {
       accelerator: "Ctrl+CmdOrCtrl+R",
       click: () => resetMainWindowSize(),
     },
+    { type: "separator" },
+    { label: "Quit", accelerator: "CmdOrCtrl+Q", click: () => app.quit() },
   ]);
 }
 
@@ -173,7 +367,6 @@ function createMainWindow(tray: Tray) {
     }
   });
   nativeTheme.on("updated", updateMainWindowTheme);
-  tray.on("right-click", () => tray.popUpContextMenu(createContextMenu()));
   return win;
 }
 
@@ -261,6 +454,278 @@ function showContextMenu() {
   tray.popUpContextMenu(createContextMenu());
 }
 
+function getSettingsWindowHtml() {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data:; script-src 'self' 'unsafe-inline';" />
+  <title>Tray ChatGPT Settings</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: Canvas;
+      color: CanvasText;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: 24px;
+      background: Canvas;
+    }
+
+    main {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      max-width: 560px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+
+    .setting {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(180px, 220px) 88px;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 0;
+      border-top: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+    }
+
+    label {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    input {
+      width: 100%;
+      min-height: 36px;
+      padding: 7px 10px;
+      border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+      border-radius: 6px;
+      background: color-mix(in srgb, Canvas 94%, CanvasText);
+      color: CanvasText;
+      font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    input.recording {
+      outline: 2px solid AccentColor;
+      outline-offset: 2px;
+    }
+
+    button {
+      min-height: 34px;
+      border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+      border-radius: 6px;
+      background: ButtonFace;
+      color: ButtonText;
+      font: inherit;
+      font-size: 13px;
+    }
+
+    button.primary {
+      background: AccentColor;
+      border-color: AccentColor;
+      color: AccentColorText;
+      font-weight: 600;
+    }
+
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      padding-top: 4px;
+    }
+
+    #status {
+      min-height: 20px;
+      color: color-mix(in srgb, CanvasText 68%, transparent);
+      font-size: 13px;
+    }
+
+    #status.error {
+      color: #c53232;
+    }
+
+    @media (max-width: 560px) {
+      body {
+        padding: 18px;
+      }
+
+      .setting {
+        grid-template-columns: 1fr;
+        gap: 8px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Settings</h1>
+    <section>
+      <div class="setting">
+        <label for="openApp">Open app</label>
+        <input id="openApp" readonly />
+        <button data-record="openApp">Record</button>
+      </div>
+      <div class="setting">
+        <label for="temporaryChat">Temporary chat</label>
+        <input id="temporaryChat" readonly />
+        <button data-record="temporaryChat">Record</button>
+      </div>
+    </section>
+    <div id="status" role="status"></div>
+    <div class="actions">
+      <button id="reset">Reset</button>
+      <button id="save" class="primary">Save</button>
+    </div>
+  </main>
+  <script>
+    const api = window.trayChatGPTSettings;
+    const fields = {
+      openApp: document.getElementById("openApp"),
+      temporaryChat: document.getElementById("temporaryChat"),
+    };
+    const status = document.getElementById("status");
+    let activeField;
+
+    function setStatus(message, isError = false) {
+      status.textContent = message;
+      status.classList.toggle("error", isError);
+    }
+
+    function normalizeKey(key) {
+      const map = {
+        " ": "Space",
+        ArrowDown: "Down",
+        ArrowLeft: "Left",
+        ArrowRight: "Right",
+        ArrowUp: "Up",
+        Esc: "Escape",
+      };
+      const value = map[key] || key;
+      return value.length === 1 ? value.toUpperCase() : value;
+    }
+
+    function acceleratorFromEvent(event) {
+      const key = normalizeKey(event.key);
+      if (["Alt", "Control", "Meta", "Shift"].includes(key)) return "";
+
+      const parts = [];
+      if (event.ctrlKey) parts.push("Ctrl");
+      if (event.altKey) parts.push("Option");
+      if (event.shiftKey) parts.push("Shift");
+      if (event.metaKey) parts.push("Command");
+      parts.push(key);
+      return parts.length > 1 ? parts.join("+") : "";
+    }
+
+    function setShortcuts(payload) {
+      fields.openApp.value = payload.shortcuts.openApp;
+      fields.temporaryChat.value = payload.shortcuts.temporaryChat;
+    }
+
+    for (const button of document.querySelectorAll("[data-record]")) {
+      button.addEventListener("click", () => {
+        activeField = fields[button.dataset.record];
+        for (const field of Object.values(fields)) field.classList.remove("recording");
+        activeField.classList.add("recording");
+        activeField.focus();
+        setStatus("Press a key combination.");
+      });
+    }
+
+    window.addEventListener("keydown", (event) => {
+      if (!activeField) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const accelerator = acceleratorFromEvent(event);
+      if (!accelerator) return;
+
+      activeField.value = accelerator;
+      activeField.classList.remove("recording");
+      activeField = undefined;
+      setStatus("");
+    });
+
+    document.getElementById("save").addEventListener("click", async () => {
+      setStatus("");
+      const result = await api.saveShortcuts({
+        openApp: fields.openApp.value,
+        temporaryChat: fields.temporaryChat.value,
+      });
+      setStatus(result.ok ? "Saved." : result.error, !result.ok);
+      if (result.ok) setShortcuts(result);
+    });
+
+    document.getElementById("reset").addEventListener("click", async () => {
+      const result = await api.resetShortcuts();
+      setStatus(result.ok ? "Defaults restored." : result.error, !result.ok);
+      if (result.ok) setShortcuts(result);
+    });
+
+    api.onShortcutsUpdated(setShortcuts);
+    api.getShortcuts().then(setShortcuts);
+  </script>
+</body>
+</html>`;
+}
+
+function createSettingsWindow() {
+  const options: BrowserWindowConstructorOptions = {
+    width: 620,
+    height: 390,
+    title: "Tray ChatGPT Settings",
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, "settings-preload.js"),
+      nodeIntegration: false,
+      sandbox: false,
+      contextIsolation: true,
+      devTools: !app.isPackaged,
+    },
+  };
+  const win = new BrowserWindow(options);
+  win.loadURL(
+    `data:text/html;charset=utf-8,${encodeURIComponent(getSettingsWindowHtml())}`,
+  );
+  win.on("closed", () => {
+    settingsWindow = undefined;
+    if (process.platform === "darwin" && !mainWindow.isVisible()) {
+      app.dock.hide();
+    }
+  });
+  return win;
+}
+
+function showSettingsWindow() {
+  if (!settingsWindow || settingsWindow.isDestroyed()) {
+    settingsWindow = createSettingsWindow();
+  }
+
+  if (process.platform === "darwin") app.dock.show();
+  settingsWindow.show();
+  settingsWindow.focus();
+  updateSettingsWindowShortcuts();
+}
+
 /* ──────────────────────────────────────────────
   5. APP LIFECYCLE
 ────────────────────────────────────────────── */
@@ -268,6 +733,7 @@ app.commandLine.appendSwitch("enable-features", "WebSpeechAPI");
 
 app.whenReady().then(async () => {
   await checkMicrophonePermission();
+  await loadShortcutConfig();
 
   // (Optional) external Google login — can be commented out if not needed
   // await ensureGoogleLogged();
@@ -385,6 +851,7 @@ app.whenReady().then(async () => {
     //   console.warn("Temporary chat toggle button was not found in time.");
     // }
   };
+  toggleTemporaryChatHandler = toggleTemporaryChat;
 
   /* Dynamic User-Agent switching (main frame only) */
   mainWindow.webContents.on(
@@ -410,17 +877,10 @@ app.whenReady().then(async () => {
   // mainWindow.webContents.on("did-finish-load", applyTemporaryChatIfEnabled);
   // mainWindow.webContents.on("did-navigate-in-page", applyTemporaryChatIfEnabled);
   mainWindow.webContents.on("before-input-event", (event, input) => {
-    const isCmdOrCtrlT =
-      input.type === "keyDown" &&
-      input.key.toLowerCase() === "t" &&
-      (input.meta || input.control) &&
-      !input.shift &&
-      !input.alt;
-
-    if (!isCmdOrCtrlT) return;
+    if (!acceleratorMatchesInput(shortcutConfig.temporaryChat, input)) return;
 
     event.preventDefault();
-    toggleTemporaryChat();
+    toggleTemporaryChatHandler?.();
   });
 
   await mainWindow.loadURL("https://chatgpt.com/");
@@ -435,7 +895,86 @@ app.whenReady().then(async () => {
     },
   );
 
-  globalShortcut.register("Ctrl+Option+Command+C", toggleMainWindow);
+  if (!registerOpenAppShortcut(shortcutConfig.openApp)) {
+    console.error(
+      `Unable to register open-app shortcut: ${shortcutConfig.openApp}`,
+    );
+  }
+});
+
+ipcMain.handle(SETTINGS_CHANNEL_GET, () => getShortcutSettingsPayload());
+
+ipcMain.handle(
+  SETTINGS_CHANNEL_SAVE,
+  async (_event: IpcMainInvokeEvent, value: unknown) => {
+    const nextConfig = normalizeShortcutConfig(value);
+    if (!nextConfig) {
+      return {
+        ok: false,
+        error:
+          "Each shortcut needs at least one modifier and one key, and both shortcuts must be different.",
+        ...getShortcutSettingsPayload(),
+      };
+    }
+
+    const previousConfig = shortcutConfig;
+    if (
+      nextConfig.openApp !== previousConfig.openApp &&
+      !registerOpenAppShortcut(nextConfig.openApp)
+    ) {
+      return {
+        ok: false,
+        error: `Could not register ${nextConfig.openApp}. It may already be used by macOS or another app.`,
+        ...getShortcutSettingsPayload(),
+      };
+    }
+
+    try {
+      await saveShortcutConfig(nextConfig);
+    } catch (error) {
+      if (nextConfig.openApp !== previousConfig.openApp) {
+        registerOpenAppShortcut(previousConfig.openApp, nextConfig.openApp);
+      }
+      shortcutConfig = previousConfig;
+      return {
+        ok: false,
+        error:
+          error instanceof Error ? error.message : "Could not save shortcuts.",
+        ...getShortcutSettingsPayload(),
+      };
+    }
+
+    return { ok: true, ...getShortcutSettingsPayload() };
+  },
+);
+
+ipcMain.handle(SETTINGS_CHANNEL_RESET, async () => {
+  const previousConfig = shortcutConfig;
+  if (
+    SHORTCUT_DEFAULTS.openApp !== previousConfig.openApp &&
+    !registerOpenAppShortcut(SHORTCUT_DEFAULTS.openApp)
+  ) {
+    return {
+      ok: false,
+      error: `Could not register ${SHORTCUT_DEFAULTS.openApp}. It may already be used by macOS or another app.`,
+      ...getShortcutSettingsPayload(),
+    };
+  }
+
+  try {
+    await saveShortcutConfig({ ...SHORTCUT_DEFAULTS });
+  } catch (error) {
+    registerOpenAppShortcut(previousConfig.openApp, SHORTCUT_DEFAULTS.openApp);
+    shortcutConfig = previousConfig;
+    return {
+      ok: false,
+      error:
+        error instanceof Error ? error.message : "Could not reset shortcuts.",
+      ...getShortcutSettingsPayload(),
+    };
+  }
+
+  return { ok: true, ...getShortcutSettingsPayload() };
 });
 
 ipcMain.on(DRAG_CHANNEL_START, () => {
