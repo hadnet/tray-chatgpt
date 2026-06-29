@@ -1,7 +1,7 @@
 {
   "name": "tray-chatgpt-app",
   "productName": "Tray ChatGPT",
-  "version": "3.1.1",
+  "version": "3.2.0",
   "description": "A tray app for ChatGPT",
   "main": "dist/index.js",
   "scripts": {
