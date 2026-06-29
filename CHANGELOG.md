@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.1](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.1.0...tray-chatgpt-app-v3.1.1) (2026-06-29)
+
+
+### Bug Fixes
+
+* configure linux package executable name ([13105e8](https://github.com/hadnet/tray-chatgpt/commit/13105e8d0aea8cfc062edfae9d93ee539d0ab8ef))
+
 ## [3.1.0](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.0.0...tray-chatgpt-app-v3.1.0) (2026-06-29)
 
 
