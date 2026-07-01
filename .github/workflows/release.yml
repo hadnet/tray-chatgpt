@@ -6,6 +6,11 @@ on:
       - main
       - master
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Existing release tag to rebuild installers for"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -15,6 +20,7 @@ permissions:
 jobs:
   release-please:
     name: Prepare release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -29,10 +35,28 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+  resolve-release:
+    name: Resolve release tag
+    needs: release-please
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || needs.release-please.outputs.release_created == 'true') }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - name: Select release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag_name=${{ inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_name=${{ needs.release-please.outputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
   build-installers:
     name: Build ${{ matrix.platform }} x64 installer
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: resolve-release
+    if: ${{ needs.resolve-release.outputs.tag_name != '' }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -51,7 +75,7 @@ jobs:
       - name: Check out release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.resolve-release.outputs.tag_name }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -78,5 +102,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         with:
-          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          tag_name: ${{ needs.resolve-release.outputs.tag_name }}
           files: out/make/**/*
+          overwrite_files: true
