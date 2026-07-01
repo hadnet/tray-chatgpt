@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.1](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.2.0...tray-chatgpt-app-v3.2.1) (2026-07-01)
+
+
+### Bug Fixes
+
+* enable yarn berry in release workflow ([229cd93](https://github.com/hadnet/tray-chatgpt/commit/229cd93bb351861de339d3c90376dc232f30c826))
+
 ## [3.2.0](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.1.1...tray-chatgpt-app-v3.2.0) (2026-06-29)
 
 
