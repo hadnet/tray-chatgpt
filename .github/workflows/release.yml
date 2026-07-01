@@ -65,7 +65,7 @@ jobs:
       matrix:
         include:
           - platform: macOS
-            os: macos-13
+            os: macos-15-intel
           - platform: Linux
             os: ubuntu-22.04
           - platform: Windows
