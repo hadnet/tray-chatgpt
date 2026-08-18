@@ -1,5 +1,6 @@
 import {
   app,
+  clipboard,
   screen,
   BrowserWindow,
   BrowserWindowConstructorOptions,
@@ -14,6 +15,7 @@ import {
   shell,
   systemPreferences,
 } from "electron";
+import { execFile } from "child_process";
 import * as path from "path";
 import * as settings from "electron-settings";
 import * as os from "os";
@@ -35,9 +37,12 @@ const SETTINGS_CHANNEL_SAVE = "settings:save-shortcuts";
 const SETTINGS_CHANNEL_RESET = "settings:reset-shortcuts";
 const SETTINGS_CHANNEL_SET_TRAY_ICON_HIDDEN =
   "settings:set-tray-icon-hidden";
+const SETTINGS_CHANNEL_SAVE_PROMPT_TEMPLATES =
+  "settings:save-prompt-templates";
 const SETTINGS_CHANNEL_UPDATED = "settings:shortcuts-updated";
 const SHORTCUT_SETTINGS_KEY = "shortcuts";
 const TRAY_ICON_HIDDEN_SETTINGS_KEY = "trayIconHidden";
+const PROMPT_TEMPLATES_SETTINGS_KEY = "promptTemplates";
 const SETTINGS_WINDOW_SHORTCUT =
   process.platform === "darwin" ? "Command+," : "Ctrl+,";
 const SETTINGS_WINDOW_SHORTCUT_LABEL =
@@ -72,6 +77,11 @@ const MODIFIER_ORDER = [
 
 type ShortcutAction = keyof typeof SHORTCUT_DEFAULTS;
 type ShortcutConfig = Record<ShortcutAction, string>;
+type PromptTemplate = {
+  id: string;
+  text: string;
+  shortcut: string;
+};
 
 let tray: Tray | undefined;
 let mainWindow: BrowserWindow;
@@ -79,6 +89,9 @@ let settingsWindow: BrowserWindow | undefined;
 let settingsWindowReady = false;
 let settingsWindowShouldShow = false;
 let shortcutConfig: ShortcutConfig = { ...SHORTCUT_DEFAULTS };
+let promptTemplates: PromptTemplate[] = [];
+const registeredPromptShortcuts = new Set<string>();
+let promptShortcutRegistrationErrors = new Set<string>();
 let trayIconHidden = false;
 let settingsShortcutRegistered = false;
 let isQuitting = false;
@@ -202,13 +215,26 @@ function normalizeAccelerator(value: unknown) {
   ].join("+");
 }
 
+function acceleratorIdentity(accelerator: string) {
+  const commandOrControl = process.platform === "darwin" ? "Command" : "Ctrl";
+  return accelerator.replace("CommandOrControl", commandOrControl);
+}
+
+function acceleratorsConflict(first: string, second: string) {
+  return acceleratorIdentity(first) === acceleratorIdentity(second);
+}
+
 function normalizeShortcutConfig(value: unknown): ShortcutConfig | undefined {
   if (!value || typeof value !== "object") return undefined;
 
   const source = value as Partial<Record<ShortcutAction, unknown>>;
   const openApp = normalizeAccelerator(source.openApp);
   const temporaryChat = normalizeAccelerator(source.temporaryChat);
-  if (!openApp || !temporaryChat || openApp === temporaryChat) {
+  if (
+    !openApp ||
+    !temporaryChat ||
+    acceleratorsConflict(openApp, temporaryChat)
+  ) {
     return undefined;
   }
 
@@ -216,11 +242,59 @@ function normalizeShortcutConfig(value: unknown): ShortcutConfig | undefined {
 }
 
 function conflictsWithSettingsShortcut(config: ShortcutConfig) {
-  const commandOrControl = process.platform === "darwin" ? "Command" : "Ctrl";
   return Object.values(config).some(
     (accelerator) =>
-      accelerator.replace("CommandOrControl", commandOrControl) ===
-      SETTINGS_WINDOW_SHORTCUT,
+      acceleratorIdentity(accelerator) === SETTINGS_WINDOW_SHORTCUT,
+  );
+}
+
+function normalizePromptTemplates(value: unknown): PromptTemplate[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const ids = new Set<string>();
+  const shortcuts = new Set<string>();
+  const normalized: PromptTemplate[] = [];
+
+  for (const item of value) {
+    if (!item || typeof item !== "object") return undefined;
+
+    const source = item as Partial<Record<keyof PromptTemplate, unknown>>;
+    const id = typeof source.id === "string" ? source.id.trim() : "";
+    const text = typeof source.text === "string" ? source.text : "";
+    const shortcut = normalizeAccelerator(source.shortcut);
+    if (!id || !text.trim() || !shortcut) return undefined;
+
+    const shortcutIdentity = acceleratorIdentity(shortcut);
+    if (ids.has(id) || shortcuts.has(shortcutIdentity)) return undefined;
+
+    ids.add(id);
+    shortcuts.add(shortcutIdentity);
+    normalized.push({ id, text, shortcut });
+  }
+
+  return normalized;
+}
+
+function promptTemplateShortcutConflict(
+  templates: PromptTemplate[],
+  shortcuts: ShortcutConfig = shortcutConfig,
+) {
+  return templates.find((template) => {
+    if (acceleratorsConflict(template.shortcut, SETTINGS_WINDOW_SHORTCUT)) {
+      return true;
+    }
+
+    return Object.values(shortcuts).some((shortcut) =>
+      acceleratorsConflict(template.shortcut, shortcut),
+    );
+  });
+}
+
+function shortcutConfigPromptConflict(config: ShortcutConfig) {
+  return promptTemplates.find((template) =>
+    Object.values(config).some((shortcut) =>
+      acceleratorsConflict(template.shortcut, shortcut),
+    ),
   );
 }
 
@@ -240,9 +314,116 @@ async function loadTrayIconSetting() {
   await settings.set(TRAY_ICON_HIDDEN_SETTINGS_KEY, trayIconHidden);
 }
 
+async function loadPromptTemplates() {
+  const saved = await settings.get(PROMPT_TEMPLATES_SETTINGS_KEY);
+  const normalized = normalizePromptTemplates(saved) ?? [];
+  promptTemplates = promptTemplateShortcutConflict(normalized) ? [] : normalized;
+  await settings.set(PROMPT_TEMPLATES_SETTINGS_KEY, promptTemplates);
+}
+
 async function saveShortcutConfig(nextConfig: ShortcutConfig) {
   await settings.set(SHORTCUT_SETTINGS_KEY, nextConfig);
   shortcutConfig = nextConfig;
+  updateSettingsWindowShortcuts();
+}
+
+function runPasteCommand(command: string, args: string[]) {
+  execFile(command, args, (error) => {
+    if (error) console.error("Unable to paste prompt template:", error);
+  });
+}
+
+function pasteClipboardAtCursor() {
+  if (process.platform === "darwin") {
+    if (!systemPreferences.isTrustedAccessibilityClient(false)) {
+      systemPreferences.isTrustedAccessibilityClient(true);
+      return;
+    }
+
+    runPasteCommand("/usr/bin/osascript", [
+      "-e",
+      'tell application "System Events" to keystroke "v" using command down',
+    ]);
+    return;
+  }
+
+  if (process.platform === "win32") {
+    runPasteCommand("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^v")',
+    ]);
+    return;
+  }
+
+  execFile(
+    "xdotool",
+    ["key", "--clearmodifiers", "ctrl+v"],
+    (xdotoolError) => {
+      if (!xdotoolError) return;
+      execFile("wtype", ["-M", "ctrl", "v", "-m", "ctrl"], (wtypeError) => {
+        if (wtypeError) {
+          console.error(
+            "Unable to paste prompt template. Install xdotool (X11) or wtype (Wayland).",
+            wtypeError,
+          );
+        }
+      });
+    },
+  );
+}
+
+function triggerPromptTemplate(text: string) {
+  clipboard.writeText(text);
+  setTimeout(pasteClipboardAtCursor, 60);
+}
+
+function unregisterPromptTemplateShortcuts() {
+  for (const shortcut of registeredPromptShortcuts) {
+    globalShortcut.unregister(shortcut);
+  }
+  registeredPromptShortcuts.clear();
+}
+
+function registerPromptTemplateShortcuts(templates: PromptTemplate[]) {
+  unregisterPromptTemplateShortcuts();
+  promptShortcutRegistrationErrors = new Set<string>();
+
+  for (const template of templates) {
+    const didRegister = globalShortcut.register(template.shortcut, () =>
+      triggerPromptTemplate(template.text),
+    );
+    if (didRegister) {
+      registeredPromptShortcuts.add(template.shortcut);
+    } else {
+      promptShortcutRegistrationErrors.add(template.id);
+    }
+  }
+}
+
+async function savePromptTemplates(nextTemplates: PromptTemplate[]) {
+  const previousTemplates = promptTemplates;
+  registerPromptTemplateShortcuts(nextTemplates);
+
+  if (promptShortcutRegistrationErrors.size > 0) {
+    const failedTemplate = nextTemplates.find((template) =>
+      promptShortcutRegistrationErrors.has(template.id),
+    );
+    registerPromptTemplateShortcuts(previousTemplates);
+    throw new Error(
+      `${failedTemplate?.shortcut ?? "A shortcut"} could not be registered. It may already be used by the system or another app.`,
+    );
+  }
+
+  try {
+    await settings.set(PROMPT_TEMPLATES_SETTINGS_KEY, nextTemplates);
+  } catch (error) {
+    registerPromptTemplateShortcuts(previousTemplates);
+    throw error;
+  }
+
+  promptTemplates = nextTemplates;
   updateSettingsWindowShortcuts();
 }
 
@@ -308,8 +489,14 @@ function getShortcutSettingsPayload() {
     shortcuts: shortcutConfig,
     defaults: SHORTCUT_DEFAULTS,
     trayIconHidden,
+    settingsShortcut: SETTINGS_WINDOW_SHORTCUT,
     settingsShortcutLabel: SETTINGS_WINDOW_SHORTCUT_LABEL,
     settingsShortcutRegistered,
+    promptTemplates,
+    promptShortcutRegistrationErrors: [
+      ...promptShortcutRegistrationErrors,
+    ],
+    platform: process.platform,
   };
 }
 
@@ -538,50 +725,205 @@ function getSettingsWindowHtml() {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: Canvas;
       color: CanvasText;
+      --accent: #0a84ff;
+      --accent-text: #ffffff;
     }
 
     * {
       box-sizing: border-box;
     }
 
-    body {
-      margin: 0;
-      min-height: 100vh;
-      padding: 24px;
-      background: Canvas;
+    [hidden] {
+      display: none !important;
     }
 
-    main {
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      background: Canvas;
+      overflow: hidden;
+    }
+
+    button,
+    input,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      min-height: 34px;
+      padding: 6px 12px;
+      border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+      border-radius: 7px;
+      background: ButtonFace;
+      color: ButtonText;
+      font-size: 13px;
+    }
+
+    button:hover {
+      background: color-mix(in srgb, ButtonFace 90%, CanvasText);
+    }
+
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--accent-text);
+      font-weight: 600;
+    }
+
+    button.danger {
+      color: #c53232;
+    }
+
+    button.icon-button {
+      display: inline-flex;
+      width: 34px;
+      min-height: 34px;
+      padding: 0;
+      align-items: center;
+      justify-content: center;
+      justify-self: center;
+      border-color: transparent;
+      background: transparent;
+      color: color-mix(in srgb, CanvasText 62%, transparent);
+    }
+
+    button.icon-button:hover {
+      background: color-mix(in srgb, CanvasText 10%, transparent);
+      color: CanvasText;
+    }
+
+    button.icon-button.danger:hover {
+      background: color-mix(in srgb, #c53232 14%, transparent);
+      color: #e54848;
+    }
+
+    button.icon-button svg {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .settings-shell {
+      display: grid;
+      grid-template-columns: 210px minmax(0, 1fr);
+      height: 100vh;
+    }
+
+    .content {
+      grid-column: 2;
+      grid-row: 1;
+      min-width: 0;
+      padding: 30px 34px;
+      overflow-y: auto;
+    }
+
+    .sidebar {
+      grid-column: 1;
+      grid-row: 1;
+      padding: 26px 14px;
+      border-right: 1px solid color-mix(in srgb, CanvasText 13%, transparent);
+      background: color-mix(in srgb, Canvas 96%, CanvasText);
+    }
+
+    .sidebar-title {
+      margin: 0 10px 20px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: color-mix(in srgb, CanvasText 56%, transparent);
+    }
+
+    .sidebar nav {
       display: flex;
       flex-direction: column;
-      gap: 18px;
-      max-width: 560px;
+      gap: 6px;
+    }
+
+    .nav-item {
+      width: 100%;
+      min-height: 38px;
+      padding: 8px 11px;
+      border-color: transparent;
+      background: transparent;
+      text-align: left;
+      font-weight: 550;
+    }
+
+    .nav-item.active {
+      border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
+      color: var(--accent);
+    }
+
+    .page {
+      display: none;
+      max-width: 610px;
       margin: 0 auto;
     }
 
+    .page.active {
+      display: block;
+    }
+
+    .page-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 26px;
+    }
+
     h1 {
-      margin: 0;
-      font-size: 22px;
-      font-weight: 650;
-      letter-spacing: 0;
+      margin: 0 0 6px;
+      font-size: 24px;
+      font-weight: 680;
     }
 
     h2 {
-      margin: 0 0 4px;
-      font-size: 13px;
+      margin: 0;
+      font-size: 15px;
       font-weight: 650;
-      color: color-mix(in srgb, CanvasText 68%, transparent);
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
+    }
+
+    .description,
+    .hint {
+      margin: 0;
+      color: color-mix(in srgb, CanvasText 62%, transparent);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .settings-group {
+      margin-bottom: 24px;
+      border: 1px solid color-mix(in srgb, CanvasText 13%, transparent);
+      border-radius: 10px;
+      overflow: hidden;
+      background: color-mix(in srgb, Canvas 98%, CanvasText);
+    }
+
+    .group-heading {
+      padding: 13px 16px;
+      border-bottom: 1px solid color-mix(in srgb, CanvasText 11%, transparent);
     }
 
     .setting {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(180px, 220px) 88px;
+      grid-template-columns: minmax(0, 1fr) 220px 82px;
       align-items: center;
       gap: 12px;
-      padding: 14px 0;
-      border-top: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+      padding: 13px 16px;
+      border-bottom: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+    }
+
+    .setting:last-child {
+      border-bottom: 0;
     }
 
     label {
@@ -594,15 +936,50 @@ function getSettingsWindowHtml() {
       min-height: 36px;
       padding: 7px 10px;
       border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
-      border-radius: 6px;
+      border-radius: 7px;
       background: color-mix(in srgb, Canvas 94%, CanvasText);
       color: CanvasText;
       font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
 
     input[type="text"].recording {
-      outline: 2px solid AccentColor;
+      outline: 2px solid var(--accent);
       outline-offset: 2px;
+    }
+
+    .shortcut-value {
+      display: flex;
+      min-width: 0;
+      min-height: 36px;
+      align-items: center;
+    }
+
+    .shortcut-display {
+      display: flex;
+      min-height: 36px;
+      align-items: center;
+      gap: 4px;
+      color: color-mix(in srgb, CanvasText 82%, transparent);
+    }
+
+    .shortcut-display.empty {
+      color: color-mix(in srgb, CanvasText 48%, transparent);
+      font-size: 13px;
+    }
+
+    .shortcut-display kbd {
+      display: inline-flex;
+      min-width: 27px;
+      height: 27px;
+      padding: 0 7px;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+      border-radius: 6px;
+      background: color-mix(in srgb, Canvas 92%, CanvasText);
+      box-shadow: 0 1px 0 color-mix(in srgb, CanvasText 18%, transparent);
+      font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: nowrap;
     }
 
     .toggle-setting {
@@ -610,116 +987,284 @@ function getSettingsWindowHtml() {
       grid-template-columns: 20px minmax(0, 1fr);
       align-items: start;
       gap: 10px;
-      padding: 14px 0;
-      border-top: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+      padding: 15px 16px;
     }
 
     .toggle-setting input {
       width: 16px;
       height: 16px;
       margin: 2px 0 0;
-      accent-color: AccentColor;
+      accent-color: var(--accent);
     }
 
-    .toggle-setting p {
+    .toggle-setting .hint {
       margin: 5px 0 0;
-      color: color-mix(in srgb, CanvasText 68%, transparent);
-      font-size: 13px;
-      line-height: 1.4;
     }
 
-    button {
-      min-height: 34px;
+    .fixed-shortcut {
+      color: color-mix(in srgb, CanvasText 56%, transparent);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .prompt-list {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .prompt-card {
+      padding: 16px;
+      border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+      border-radius: 10px;
+      background: color-mix(in srgb, Canvas 98%, CanvasText);
+    }
+
+    .prompt-card.unavailable {
+      border-color: #c53232;
+    }
+
+    .prompt-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    .prompt-number {
+      font-size: 13px;
+      font-weight: 650;
+      color: color-mix(in srgb, CanvasText 65%, transparent);
+    }
+
+    textarea {
+      display: block;
+      width: 100%;
+      min-height: 94px;
+      margin-top: 7px;
+      padding: 10px 11px;
+      resize: vertical;
       border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
-      border-radius: 6px;
-      background: ButtonFace;
-      color: ButtonText;
-      font: inherit;
-      font-size: 13px;
+      border-radius: 7px;
+      background: color-mix(in srgb, Canvas 94%, CanvasText);
+      color: CanvasText;
+      font-size: 14px;
+      font-weight: 400;
+      line-height: 1.45;
     }
 
-    button.primary {
-      background: AccentColor;
-      border-color: AccentColor;
-      color: AccentColorText;
-      font-weight: 600;
+    textarea:focus,
+    input:focus {
+      outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+      outline-offset: 1px;
+    }
+
+    .prompt-shortcut-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 40px;
+      align-items: end;
+      gap: 10px;
+      margin-top: 13px;
+    }
+
+    #templatePermissionHint {
+      margin-bottom: 16px;
+    }
+
+    .prompt-shortcut-row label {
+      grid-column: 1 / -1;
+      margin-bottom: -4px;
+    }
+
+    .prompt-error {
+      margin: 10px 0 0;
+      color: #c53232;
+      font-size: 12px;
+    }
+
+    .empty-state {
+      padding: 54px 28px;
+      border: 1px dashed color-mix(in srgb, CanvasText 22%, transparent);
+      border-radius: 10px;
+      color: color-mix(in srgb, CanvasText 58%, transparent);
+      text-align: center;
+      font-size: 14px;
     }
 
     .actions {
       display: flex;
+      align-items: center;
       justify-content: flex-end;
       gap: 10px;
-      padding-top: 4px;
+      margin-top: 16px;
     }
 
-    #status {
+    .status {
+      flex: 1;
       min-height: 20px;
       color: color-mix(in srgb, CanvasText 68%, transparent);
       font-size: 13px;
     }
 
-    #status.error {
+    .status.error {
       color: #c53232;
     }
 
-    @media (max-width: 560px) {
-      body {
-        padding: 18px;
-      }
-
+    @media (max-width: 760px) {
       .setting {
-        grid-template-columns: 1fr;
+        grid-template-columns: 1fr 180px 76px;
         gap: 8px;
       }
     }
   </style>
 </head>
 <body>
-  <main>
-    <h1>Settings</h1>
-    <section>
-      <h2>General</h2>
-      <div class="toggle-setting">
-        <input id="hideTrayIcon" type="checkbox" />
-        <div>
-          <label for="hideTrayIcon">Hide system tray icon</label>
-          <p id="trayShortcutHint">You can reopen Settings with Command+,.</p>
+  <div class="settings-shell">
+    <main class="content">
+      <section id="page-general" class="page active" data-page-panel="general">
+        <header class="page-header">
+          <div>
+            <h1>General</h1>
+            <p class="description">Manage the tray icon and app-wide keyboard shortcuts.</p>
+          </div>
+        </header>
+
+        <div class="settings-group">
+          <div class="group-heading"><h2>Tray icon</h2></div>
+          <div class="toggle-setting">
+            <input id="hideTrayIcon" type="checkbox" />
+            <div>
+              <label for="hideTrayIcon">Hide system tray icon</label>
+              <p id="trayShortcutHint" class="hint">You can reopen Settings with Command+,.</p>
+            </div>
+          </div>
         </div>
-      </div>
-    </section>
-    <section>
-      <h2>Keyboard shortcuts</h2>
-      <div class="setting">
-        <label for="openApp">Open app</label>
-        <input id="openApp" readonly />
-        <button data-record="openApp">Record</button>
-      </div>
-      <div class="setting">
-        <label for="temporaryChat">Temporary chat</label>
-        <input id="temporaryChat" readonly />
-        <button data-record="temporaryChat">Record</button>
-      </div>
-    </section>
-    <div id="status" role="status"></div>
-    <div class="actions">
-      <button id="reset">Reset shortcuts</button>
-      <button id="save" class="primary">Save shortcuts</button>
-    </div>
-  </main>
+
+        <div class="settings-group">
+          <div class="group-heading"><h2>Keyboard shortcuts</h2></div>
+          <div class="setting">
+            <label for="openApp">Open app</label>
+            <div class="shortcut-value">
+              <span id="openAppDisplay" class="shortcut-display"></span>
+              <input id="openApp" hidden readonly />
+            </div>
+            <button
+              class="icon-button"
+              data-record="openApp"
+              aria-label="Edit Open app shortcut"
+              title="Edit shortcut"
+            ></button>
+          </div>
+          <div class="setting">
+            <label for="temporaryChat">Temporary chat</label>
+            <div class="shortcut-value">
+              <span id="temporaryChatDisplay" class="shortcut-display"></span>
+              <input id="temporaryChat" hidden readonly />
+            </div>
+            <button
+              class="icon-button"
+              data-record="temporaryChat"
+              aria-label="Edit Temporary chat shortcut"
+              title="Edit shortcut"
+            ></button>
+          </div>
+          <div class="setting">
+            <label>Open Settings</label>
+            <span id="settingsShortcutDisplay" class="shortcut-display"></span>
+            <span class="fixed-shortcut">Fixed</span>
+          </div>
+        </div>
+
+        <div class="actions">
+          <div id="generalStatus" class="status" role="status"></div>
+          <button id="reset">Reset shortcuts</button>
+          <button id="save" class="primary">Save shortcuts</button>
+        </div>
+      </section>
+
+      <section id="page-prompt-templates" class="page" data-page-panel="prompt-templates">
+        <header class="page-header">
+          <div>
+            <h1>Prompt Templates</h1>
+            <p class="description">Paste reusable text into any app with a global shortcut.</p>
+          </div>
+          <button id="addPrompt" class="primary">Add prompt</button>
+        </header>
+
+        <p id="templatePermissionHint" class="hint"></p>
+        <div id="templateList" class="prompt-list"></div>
+        <div id="templateEmpty" class="empty-state">
+          No prompt templates yet. Add one to create your first reusable prompt.
+        </div>
+
+        <div class="actions">
+          <div id="templateStatus" class="status" role="status"></div>
+          <button id="savePrompts" class="primary">Save templates</button>
+        </div>
+      </section>
+    </main>
+
+    <aside class="sidebar" aria-label="Settings sections">
+      <div class="sidebar-title">Settings</div>
+      <nav>
+        <button class="nav-item active" data-page="general" aria-selected="true">General</button>
+        <button class="nav-item" data-page="prompt-templates" aria-selected="false">Prompt Templates</button>
+      </nav>
+    </aside>
+  </div>
   <script>
     const api = window.trayChatGPTSettings;
     const fields = {
       openApp: document.getElementById("openApp"),
       temporaryChat: document.getElementById("temporaryChat"),
     };
-    const status = document.getElementById("status");
+    const shortcutDisplays = {
+      openApp: document.getElementById("openAppDisplay"),
+      temporaryChat: document.getElementById("temporaryChatDisplay"),
+    };
+    const settingsShortcutDisplay = document.getElementById(
+      "settingsShortcutDisplay",
+    );
+    const generalStatus = document.getElementById("generalStatus");
+    const templateStatus = document.getElementById("templateStatus");
     const hideTrayIcon = document.getElementById("hideTrayIcon");
     const trayShortcutHint = document.getElementById("trayShortcutHint");
+    const templatePermissionHint = document.getElementById("templatePermissionHint");
+    const templateList = document.getElementById("templateList");
+    const templateEmpty = document.getElementById("templateEmpty");
+    let promptTemplates = [];
+    let promptRegistrationErrors = new Set();
+    let templatesDirty = false;
+    let templateIdCounter = 0;
+    let currentPlatform = "darwin";
     let activeField;
 
-    function setStatus(message, isError = false) {
-      status.textContent = message;
-      status.classList.toggle("error", isError);
+    function setStatus(target, message, isError = false) {
+      target.textContent = message;
+      target.classList.toggle("error", isError);
+    }
+
+    function setButtonIcon(button, icon, label) {
+      const icons = {
+        edit:
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>',
+        remove:
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>',
+      };
+      button.innerHTML = icons[icon];
+      button.setAttribute("aria-label", label);
+      button.title = label;
+    }
+
+    function showPage(pageName) {
+      for (const page of document.querySelectorAll("[data-page-panel]")) {
+        page.classList.toggle("active", page.dataset.pagePanel === pageName);
+      }
+      for (const button of document.querySelectorAll("[data-page]")) {
+        const active = button.dataset.page === pageName;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", String(active));
+      }
     }
 
     function normalizeKey(key) {
@@ -748,24 +1293,224 @@ function getSettingsWindowHtml() {
       return parts.length > 1 ? parts.join("+") : "";
     }
 
-    function setSettings(payload) {
+    function shortcutPartLabel(part, platform) {
+      if (platform === "darwin") {
+        const macSymbols = {
+          Alt: "⌥",
+          Backspace: "⌫",
+          Command: "⌘",
+          CommandOrControl: "⌘",
+          Control: "⌃",
+          Ctrl: "⌃",
+          Delete: "⌦",
+          Down: "↓",
+          End: "↘",
+          Enter: "↩",
+          Escape: "⎋",
+          Home: "↖",
+          Left: "←",
+          Option: "⌥",
+          Plus: "+",
+          Right: "→",
+          Shift: "⇧",
+          Space: "␠",
+          Tab: "⇥",
+          Up: "↑",
+        };
+        return macSymbols[part] || part;
+      }
+
+      const labels = {
+        Command: "Meta",
+        CommandOrControl: "Ctrl",
+        Control: "Ctrl",
+        Option: "Alt",
+        Super: "Meta",
+      };
+      return labels[part] || part;
+    }
+
+    function renderShortcut(target, accelerator, platform = currentPlatform) {
+      target.replaceChildren();
+      target.classList.toggle("empty", !accelerator);
+      if (!accelerator) {
+        target.textContent = "Not assigned";
+        return;
+      }
+
+      for (const part of accelerator.split("+")) {
+        const key = document.createElement("kbd");
+        key.textContent = shortcutPartLabel(part, platform);
+        target.appendChild(key);
+      }
+    }
+
+    function cancelRecording() {
+      if (!activeField) return;
+      activeField.input.classList.remove("recording");
+      activeField.input.hidden = true;
+      activeField.display.hidden = false;
+      activeField = undefined;
+    }
+
+    function beginRecording(input, display, onCommit, statusTarget) {
+      cancelRecording();
+      activeField = { input, display, onCommit, statusTarget };
+      display.hidden = true;
+      input.hidden = false;
+      input.classList.add("recording");
+      input.focus();
+      input.select();
+      setStatus(statusTarget, "Press a key combination. Press Escape to cancel.");
+    }
+
+    function createTemplateId() {
+      templateIdCounter += 1;
+      return "prompt-" + Date.now().toString(36) + "-" + templateIdCounter.toString(36);
+    }
+
+    function markTemplatesDirty() {
+      templatesDirty = true;
+      setStatus(templateStatus, "Unsaved changes.");
+    }
+
+    function renderTemplates() {
+      cancelRecording();
+      templateList.replaceChildren();
+      templateEmpty.hidden = promptTemplates.length > 0;
+
+      promptTemplates.forEach((template, index) => {
+        const card = document.createElement("article");
+        card.className = "prompt-card";
+        if (promptRegistrationErrors.has(template.id)) {
+          card.classList.add("unavailable");
+        }
+
+        const header = document.createElement("div");
+        header.className = "prompt-card-header";
+        const number = document.createElement("span");
+        number.className = "prompt-number";
+        number.textContent = "Prompt " + (index + 1);
+        const remove = document.createElement("button");
+        remove.className = "icon-button danger";
+        setButtonIcon(remove, "remove", "Remove prompt " + (index + 1));
+        remove.addEventListener("click", () => {
+          promptTemplates = promptTemplates.filter((item) => item.id !== template.id);
+          promptRegistrationErrors.delete(template.id);
+          markTemplatesDirty();
+          renderTemplates();
+        });
+        header.append(number, remove);
+
+        const promptLabel = document.createElement("label");
+        promptLabel.textContent = "Prompt text";
+        const textarea = document.createElement("textarea");
+        textarea.placeholder = "Example: Translate this into informal English";
+        textarea.value = template.text;
+        textarea.addEventListener("input", () => {
+          template.text = textarea.value;
+          markTemplatesDirty();
+        });
+        promptLabel.appendChild(textarea);
+
+        const shortcutRow = document.createElement("div");
+        shortcutRow.className = "prompt-shortcut-row";
+        const shortcutLabel = document.createElement("label");
+        shortcutLabel.textContent = "Global keyboard shortcut";
+        const shortcutInput = document.createElement("input");
+        shortcutInput.type = "text";
+        shortcutInput.readOnly = true;
+        shortcutInput.placeholder = "Not assigned";
+        shortcutInput.value = template.shortcut;
+        shortcutInput.hidden = true;
+        const shortcutDisplay = document.createElement("span");
+        shortcutDisplay.className = "shortcut-display";
+        renderShortcut(shortcutDisplay, template.shortcut);
+        const shortcutValue = document.createElement("div");
+        shortcutValue.className = "shortcut-value";
+        shortcutValue.append(shortcutDisplay, shortcutInput);
+        const record = document.createElement("button");
+        record.className = "icon-button";
+        setButtonIcon(record, "edit", "Edit prompt shortcut");
+        record.addEventListener("click", () => {
+          beginRecording(
+            shortcutInput,
+            shortcutDisplay,
+            (accelerator) => {
+              template.shortcut = accelerator;
+              markTemplatesDirty();
+            },
+            templateStatus,
+          );
+        });
+        shortcutRow.append(shortcutLabel, shortcutValue, record);
+
+        card.append(header, promptLabel, shortcutRow);
+        if (promptRegistrationErrors.has(template.id)) {
+          const error = document.createElement("p");
+          error.className = "prompt-error";
+          error.textContent =
+            "This shortcut is unavailable. Record another shortcut and save again.";
+          card.appendChild(error);
+        }
+        templateList.appendChild(card);
+      });
+    }
+
+    function setSettings(payload, forceTemplates = false) {
+      currentPlatform = payload.platform;
       fields.openApp.value = payload.shortcuts.openApp;
       fields.temporaryChat.value = payload.shortcuts.temporaryChat;
+      renderShortcut(shortcutDisplays.openApp, payload.shortcuts.openApp);
+      renderShortcut(
+        shortcutDisplays.temporaryChat,
+        payload.shortcuts.temporaryChat,
+      );
+      renderShortcut(settingsShortcutDisplay, payload.settingsShortcut);
       hideTrayIcon.checked = payload.trayIconHidden;
       hideTrayIcon.disabled = !payload.settingsShortcutRegistered;
       trayShortcutHint.textContent = payload.settingsShortcutRegistered
         ? "You can reopen Settings with " + payload.settingsShortcutLabel + "."
         : "The Settings shortcut is unavailable, so the tray icon must remain visible.";
+
+      if (payload.platform === "darwin") {
+        templatePermissionHint.textContent =
+          "The first time you use a template, macOS may ask for Accessibility and Automation access so Tray ChatGPT can paste at the cursor.";
+      } else if (payload.platform === "linux") {
+        templatePermissionHint.textContent =
+          "System-wide paste requires xdotool on X11 or wtype on Wayland.";
+      } else {
+        templatePermissionHint.textContent =
+          "Shortcuts work globally and paste without bringing Tray ChatGPT to the front.";
+      }
+
+      promptRegistrationErrors = new Set(payload.promptShortcutRegistrationErrors || []);
+      if (forceTemplates || !templatesDirty) {
+        promptTemplates = (payload.promptTemplates || []).map((template) => ({
+          id: template.id,
+          text: template.text,
+          shortcut: template.shortcut,
+        }));
+        templatesDirty = false;
+        renderTemplates();
+      }
     }
 
     for (const button of document.querySelectorAll("[data-record]")) {
+      setButtonIcon(button, "edit", button.getAttribute("aria-label"));
       button.addEventListener("click", () => {
-        activeField = fields[button.dataset.record];
-        for (const field of Object.values(fields)) field.classList.remove("recording");
-        activeField.classList.add("recording");
-        activeField.focus();
-        setStatus("Press a key combination.");
+        const shortcutName = button.dataset.record;
+        beginRecording(
+          fields[shortcutName],
+          shortcutDisplays[shortcutName],
+          () => {},
+          generalStatus,
+        );
       });
+    }
+
+    for (const button of document.querySelectorAll("[data-page]")) {
+      button.addEventListener("click", () => showPage(button.dataset.page));
     }
 
     window.addEventListener("keydown", (event) => {
@@ -773,49 +1518,93 @@ function getSettingsWindowHtml() {
       event.preventDefault();
       event.stopPropagation();
 
+      if (
+        event.key === "Escape" &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey
+      ) {
+        const statusTarget = activeField.statusTarget;
+        cancelRecording();
+        setStatus(statusTarget, "");
+        return;
+      }
+
       const accelerator = acceleratorFromEvent(event);
       if (!accelerator) return;
 
-      activeField.value = accelerator;
-      activeField.classList.remove("recording");
+      const recording = activeField;
+      recording.input.value = accelerator;
+      recording.input.classList.remove("recording");
+      recording.input.hidden = true;
+      recording.display.hidden = false;
       activeField = undefined;
-      setStatus("");
+      recording.onCommit(accelerator);
+      renderShortcut(recording.display, accelerator);
+      setStatus(recording.statusTarget, "");
     });
 
     document.getElementById("save").addEventListener("click", async () => {
-      setStatus("");
+      setStatus(generalStatus, "");
       const result = await api.saveShortcuts({
         openApp: fields.openApp.value,
         temporaryChat: fields.temporaryChat.value,
       });
-      setStatus(result.ok ? "Saved." : result.error, !result.ok);
-      if (result.ok) setSettings(result);
+      setStatus(generalStatus, result.ok ? "Saved." : result.error, !result.ok);
+      if (result.ok) setSettings(result, false);
     });
 
     document.getElementById("reset").addEventListener("click", async () => {
       const result = await api.resetShortcuts();
-      setStatus(result.ok ? "Defaults restored." : result.error, !result.ok);
-      if (result.ok) setSettings(result);
+      setStatus(
+        generalStatus,
+        result.ok ? "Defaults restored." : result.error,
+        !result.ok,
+      );
+      if (result.ok) setSettings(result, false);
     });
 
     hideTrayIcon.addEventListener("change", async () => {
-      setStatus("");
+      setStatus(generalStatus, "");
       const result = await api.setTrayIconHidden(hideTrayIcon.checked);
-      setSettings(result);
+      setSettings(result, false);
       if (!result.ok) {
-        setStatus(result.error, true);
+        setStatus(generalStatus, result.error, true);
         return;
       }
 
       setStatus(
+        generalStatus,
         result.trayIconHidden
           ? "Tray icon hidden. Use " + result.settingsShortcutLabel + " to reopen Settings."
           : "Tray icon shown.",
       );
     });
 
-    api.onShortcutsUpdated(setSettings);
-    api.getShortcuts().then(setSettings);
+    document.getElementById("addPrompt").addEventListener("click", () => {
+      const template = { id: createTemplateId(), text: "", shortcut: "" };
+      promptTemplates.push(template);
+      markTemplatesDirty();
+      renderTemplates();
+      const textareas = templateList.querySelectorAll("textarea");
+      textareas[textareas.length - 1]?.focus();
+    });
+
+    document.getElementById("savePrompts").addEventListener("click", async () => {
+      setStatus(templateStatus, "");
+      const result = await api.savePromptTemplates(promptTemplates);
+      if (!result.ok) {
+        setStatus(templateStatus, result.error, true);
+        return;
+      }
+
+      setSettings(result, true);
+      setStatus(templateStatus, "Prompt templates saved.");
+    });
+
+    api.onShortcutsUpdated((payload) => setSettings(payload, false));
+    api.getShortcuts().then((payload) => setSettings(payload, true));
   </script>
 </body>
 </html>`;
@@ -823,8 +1612,8 @@ function getSettingsWindowHtml() {
 
 function createSettingsWindow() {
   const options: BrowserWindowConstructorOptions = {
-    width: 620,
-    height: 500,
+    width: 900,
+    height: 640,
     title: "Tray ChatGPT Settings",
     resizable: false,
     minimizable: false,
@@ -900,12 +1689,12 @@ app.commandLine.appendSwitch("enable-features", "WebSpeechAPI");
 app.whenReady().then(async () => {
   await checkMicrophonePermission();
   await Promise.all([loadShortcutConfig(), loadTrayIconSetting()]);
+  await loadPromptTemplates();
 
   // (Optional) external Google login — can be commented out if not needed
   // await ensureGoogleLogged();
 
   mainWindow = createMainWindow();
-  settingsWindow = createSettingsWindow();
   settingsShortcutRegistered = globalShortcut.register(
     SETTINGS_WINDOW_SHORTCUT,
     showSettingsWindow,
@@ -924,6 +1713,13 @@ app.whenReady().then(async () => {
     }
   }
   updateTrayIconVisibility();
+  if (!registerOpenAppShortcut(shortcutConfig.openApp)) {
+    console.error(
+      `Unable to register open-app shortcut: ${shortcutConfig.openApp}`,
+    );
+  }
+  registerPromptTemplateShortcuts(promptTemplates);
+  settingsWindow = createSettingsWindow();
 
   // after creating mainWindow:
   const CHROME_UA =
@@ -1079,11 +1875,6 @@ app.whenReady().then(async () => {
     },
   );
 
-  if (!registerOpenAppShortcut(shortcutConfig.openApp)) {
-    console.error(
-      `Unable to register open-app shortcut: ${shortcutConfig.openApp}`,
-    );
-  }
 });
 
 ipcMain.handle(SETTINGS_CHANNEL_GET, () => getShortcutSettingsPayload());
@@ -1105,6 +1896,15 @@ ipcMain.handle(
       return {
         ok: false,
         error: `${SETTINGS_WINDOW_SHORTCUT_LABEL} is reserved for opening Settings.`,
+        ...getShortcutSettingsPayload(),
+      };
+    }
+
+    const promptConflict = shortcutConfigPromptConflict(nextConfig);
+    if (promptConflict) {
+      return {
+        ok: false,
+        error: `${promptConflict.shortcut} is already assigned to a prompt template.`,
         ...getShortcutSettingsPayload(),
       };
     }
@@ -1142,6 +1942,15 @@ ipcMain.handle(
 
 ipcMain.handle(SETTINGS_CHANNEL_RESET, async () => {
   const previousConfig = shortcutConfig;
+  const promptConflict = shortcutConfigPromptConflict({ ...SHORTCUT_DEFAULTS });
+  if (promptConflict) {
+    return {
+      ok: false,
+      error: `${promptConflict.shortcut} is already assigned to a prompt template.`,
+      ...getShortcutSettingsPayload(),
+    };
+  }
+
   if (
     SHORTCUT_DEFAULTS.openApp !== previousConfig.openApp &&
     !registerOpenAppShortcut(SHORTCUT_DEFAULTS.openApp)
@@ -1198,6 +2007,47 @@ ipcMain.handle(
           error instanceof Error
             ? error.message
             : "Could not update tray icon visibility.",
+        ...getShortcutSettingsPayload(),
+      };
+    }
+  },
+);
+
+ipcMain.handle(
+  SETTINGS_CHANNEL_SAVE_PROMPT_TEMPLATES,
+  async (_event: IpcMainInvokeEvent, value: unknown) => {
+    const nextTemplates = normalizePromptTemplates(value);
+    if (!nextTemplates) {
+      return {
+        ok: false,
+        error:
+          "Every prompt template needs text and a unique shortcut with at least one modifier.",
+        ...getShortcutSettingsPayload(),
+      };
+    }
+
+    const reservedConflict = promptTemplateShortcutConflict(nextTemplates);
+    if (reservedConflict) {
+      return {
+        ok: false,
+        error: `${reservedConflict.shortcut} is already used by an app shortcut.`,
+        ...getShortcutSettingsPayload(),
+      };
+    }
+
+    try {
+      await savePromptTemplates(nextTemplates);
+      if (process.platform === "darwin" && nextTemplates.length > 0) {
+        systemPreferences.isTrustedAccessibilityClient(true);
+      }
+      return { ok: true, ...getShortcutSettingsPayload() };
+    } catch (error) {
+      return {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not save prompt templates.",
         ...getShortcutSettingsPayload(),
       };
     }

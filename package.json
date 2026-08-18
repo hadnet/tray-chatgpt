@@ -32,6 +32,7 @@
         },
         "extendInfo": {
           "NSMicrophoneUsageDescription": "Allow microphone access for Advanced mode of ChatGPT",
+          "NSAppleEventsUsageDescription": "Allow Tray ChatGPT to paste prompt templates into other applications",
           "NSCameraUseContinuityCameraDeviceType": [
             "AVCaptureDeviceTypeContinuityCamera"
           ]

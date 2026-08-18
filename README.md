@@ -22,6 +22,15 @@ This is a simple desktop app tray for [ChatGPT](https://chat.openai.com/chat).
 The system tray icon can be hidden from Settings. The Settings shortcut remains
 available while the icon is hidden so it can be turned back on at any time.
 
+### Prompt Templates
+
+Settings also supports reusable prompt templates. Each template contains text and
+a custom global keyboard shortcut. Triggering the shortcut copies the template and
+pastes it at the current cursor without bringing Tray ChatGPT to the front.
+
+On macOS, allow Accessibility and Automation access when prompted. On Linux,
+system-wide paste requires `xdotool` on X11 or `wtype` on Wayland.
+
 ## Screenshot
 
 <img src="./images/screenshot.png" width="400">

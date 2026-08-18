@@ -1,5 +1,14 @@
-<key>NSMicrophoneUsageDescription</key>
-<<key>NSCameraUseContinuityCameraDeviceType</key>
-<array>
-  <string>AVCaptureDeviceTypeContinuityCamera</string>
-</array>string>Allow ChatGPT to access your microphone</string>
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Allow ChatGPT to access your microphone</string>
+  <key>NSCameraUseContinuityCameraDeviceType</key>
+  <array>
+    <string>AVCaptureDeviceTypeContinuityCamera</string>
+  </array>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Allow Tray ChatGPT to paste prompt templates into other applications</string>
+</dict>
+</plist>
