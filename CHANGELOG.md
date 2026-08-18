@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.2.2](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.2.1...tray-chatgpt-app-v3.2.2) (2026-08-18)
+
+
+### Features
+
+* add support for user-defined global prompt templates with keyboard shortcuts ([bf89833](https://github.com/hadnet/tray-chatgpt/commit/bf8983306c83aa8919b05242375102b4ed9e05ce))
+* add option to hide system tray icon and configure visibility via settings window shortcut ([dff5781](https://github.com/hadnet/tray-chatgpt/commit/dff578130ed2b6ac5c49a7d76ad207fd4c53d103))
+
 ## [3.2.1](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.2.0...tray-chatgpt-app-v3.2.1) (2026-07-01)
 
 
