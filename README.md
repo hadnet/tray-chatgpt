@@ -14,9 +14,13 @@ This is a simple desktop app tray for [ChatGPT](https://chat.openai.com/chat).
 
 - Hotkey: `Ctrl+Option+Command+C`
 - Temporary Chat: `Command+T`
+- Settings: `Command+,` (`Ctrl+,` on Windows and Linux)
 - Quit: `Command+Q` or `ESC`
 - Reload: `Command+R`
 - Toggle Full Screen: `Ctrl+Command+F`
+
+The system tray icon can be hidden from Settings. The Settings shortcut remains
+available while the icon is hidden so it can be turned back on at any time.
 
 ## Screenshot
 

@@ -33,7 +33,15 @@ const VISIBLE_ON_CURRENT_SPACE_OPTIONS = { visibleOnFullScreen: true };
 const SETTINGS_CHANNEL_GET = "settings:get-shortcuts";
 const SETTINGS_CHANNEL_SAVE = "settings:save-shortcuts";
 const SETTINGS_CHANNEL_RESET = "settings:reset-shortcuts";
+const SETTINGS_CHANNEL_SET_TRAY_ICON_HIDDEN =
+  "settings:set-tray-icon-hidden";
+const SETTINGS_CHANNEL_UPDATED = "settings:shortcuts-updated";
 const SHORTCUT_SETTINGS_KEY = "shortcuts";
+const TRAY_ICON_HIDDEN_SETTINGS_KEY = "trayIconHidden";
+const SETTINGS_WINDOW_SHORTCUT =
+  process.platform === "darwin" ? "Command+," : "Ctrl+,";
+const SETTINGS_WINDOW_SHORTCUT_LABEL =
+  process.platform === "darwin" ? "⌘," : "Ctrl+,";
 const SHORTCUT_DEFAULTS = {
   openApp: "Ctrl+Option+Command+C",
   temporaryChat: "CommandOrControl+T",
@@ -65,10 +73,15 @@ const MODIFIER_ORDER = [
 type ShortcutAction = keyof typeof SHORTCUT_DEFAULTS;
 type ShortcutConfig = Record<ShortcutAction, string>;
 
-let tray: Tray;
+let tray: Tray | undefined;
 let mainWindow: BrowserWindow;
 let settingsWindow: BrowserWindow | undefined;
+let settingsWindowReady = false;
+let settingsWindowShouldShow = false;
 let shortcutConfig: ShortcutConfig = { ...SHORTCUT_DEFAULTS };
+let trayIconHidden = false;
+let settingsShortcutRegistered = false;
+let isQuitting = false;
 let toggleTemporaryChatHandler: (() => void | Promise<void>) | undefined;
 let resetWorkspaceVisibilityTimer: ReturnType<typeof setTimeout> | undefined;
 let dragState:
@@ -202,10 +215,29 @@ function normalizeShortcutConfig(value: unknown): ShortcutConfig | undefined {
   return { openApp, temporaryChat };
 }
 
+function conflictsWithSettingsShortcut(config: ShortcutConfig) {
+  const commandOrControl = process.platform === "darwin" ? "Command" : "Ctrl";
+  return Object.values(config).some(
+    (accelerator) =>
+      accelerator.replace("CommandOrControl", commandOrControl) ===
+      SETTINGS_WINDOW_SHORTCUT,
+  );
+}
+
 async function loadShortcutConfig() {
   const saved = await settings.get(SHORTCUT_SETTINGS_KEY);
-  shortcutConfig = normalizeShortcutConfig(saved) ?? { ...SHORTCUT_DEFAULTS };
+  const normalized = normalizeShortcutConfig(saved);
+  shortcutConfig =
+    normalized && !conflictsWithSettingsShortcut(normalized)
+      ? normalized
+      : { ...SHORTCUT_DEFAULTS };
   await settings.set(SHORTCUT_SETTINGS_KEY, shortcutConfig);
+}
+
+async function loadTrayIconSetting() {
+  const saved = await settings.get(TRAY_ICON_HIDDEN_SETTINGS_KEY);
+  trayIconHidden = typeof saved === "boolean" ? saved : false;
+  await settings.set(TRAY_ICON_HIDDEN_SETTINGS_KEY, trayIconHidden);
 }
 
 async function saveShortcutConfig(nextConfig: ShortcutConfig) {
@@ -275,13 +307,16 @@ function getShortcutSettingsPayload() {
   return {
     shortcuts: shortcutConfig,
     defaults: SHORTCUT_DEFAULTS,
+    trayIconHidden,
+    settingsShortcutLabel: SETTINGS_WINDOW_SHORTCUT_LABEL,
+    settingsShortcutRegistered,
   };
 }
 
 function updateSettingsWindowShortcuts() {
   if (!settingsWindow || settingsWindow.isDestroyed()) return;
   settingsWindow.webContents.send(
-    "settings:shortcuts-updated",
+    SETTINGS_CHANNEL_UPDATED,
     getShortcutSettingsPayload(),
   );
 }
@@ -299,6 +334,35 @@ function createTray() {
   return tray;
 }
 
+function updateTrayIconVisibility() {
+  if (trayIconHidden) {
+    tray?.destroy();
+    tray = undefined;
+    return;
+  }
+
+  if (!tray || tray.isDestroyed()) {
+    tray = createTray();
+  }
+}
+
+async function saveTrayIconHidden(nextValue: boolean) {
+  const previousValue = trayIconHidden;
+  await settings.set(TRAY_ICON_HIDDEN_SETTINGS_KEY, nextValue);
+  trayIconHidden = nextValue;
+
+  try {
+    updateTrayIconVisibility();
+  } catch (error) {
+    trayIconHidden = previousValue;
+    await settings.set(TRAY_ICON_HIDDEN_SETTINGS_KEY, previousValue);
+    updateTrayIconVisibility();
+    throw error;
+  }
+
+  updateSettingsWindowShortcuts();
+}
+
 function createContextMenu() {
   return Menu.buildFromTemplate([
     {
@@ -308,6 +372,8 @@ function createContextMenu() {
     },
     {
       label: "Settings",
+      accelerator: SETTINGS_WINDOW_SHORTCUT,
+      registerAccelerator: false,
       click: () => showSettingsWindow(),
     },
     { type: "separator" },
@@ -336,7 +402,7 @@ function createContextMenu() {
   ]);
 }
 
-function createMainWindow(tray: Tray) {
+function createMainWindow() {
   const win = new BrowserWindow({
     frame: false,
     resizable: true,
@@ -413,7 +479,12 @@ function hideMainWindow() {
     );
   }
   mainWindow.hide();
-  if (process.platform === "darwin") app.dock.hide();
+  if (
+    process.platform === "darwin" &&
+    (!settingsWindow || !settingsWindow.isVisible())
+  ) {
+    app.dock.hide();
+  }
 }
 function clearWorkspaceVisibilityReset() {
   if (!resetWorkspaceVisibilityTimer) return;
@@ -451,7 +522,7 @@ function updateMainWindowTheme() {
   );
 }
 function showContextMenu() {
-  tray.popUpContextMenu(createContextMenu());
+  tray?.popUpContextMenu(createContextMenu());
 }
 
 function getSettingsWindowHtml() {
@@ -495,6 +566,15 @@ function getSettingsWindowHtml() {
       letter-spacing: 0;
     }
 
+    h2 {
+      margin: 0 0 4px;
+      font-size: 13px;
+      font-weight: 650;
+      color: color-mix(in srgb, CanvasText 68%, transparent);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
     .setting {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(180px, 220px) 88px;
@@ -509,7 +589,7 @@ function getSettingsWindowHtml() {
       font-weight: 600;
     }
 
-    input {
+    input[type="text"] {
       width: 100%;
       min-height: 36px;
       padding: 7px 10px;
@@ -520,9 +600,32 @@ function getSettingsWindowHtml() {
       font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
 
-    input.recording {
+    input[type="text"].recording {
       outline: 2px solid AccentColor;
       outline-offset: 2px;
+    }
+
+    .toggle-setting {
+      display: grid;
+      grid-template-columns: 20px minmax(0, 1fr);
+      align-items: start;
+      gap: 10px;
+      padding: 14px 0;
+      border-top: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+    }
+
+    .toggle-setting input {
+      width: 16px;
+      height: 16px;
+      margin: 2px 0 0;
+      accent-color: AccentColor;
+    }
+
+    .toggle-setting p {
+      margin: 5px 0 0;
+      color: color-mix(in srgb, CanvasText 68%, transparent);
+      font-size: 13px;
+      line-height: 1.4;
     }
 
     button {
@@ -575,6 +678,17 @@ function getSettingsWindowHtml() {
   <main>
     <h1>Settings</h1>
     <section>
+      <h2>General</h2>
+      <div class="toggle-setting">
+        <input id="hideTrayIcon" type="checkbox" />
+        <div>
+          <label for="hideTrayIcon">Hide system tray icon</label>
+          <p id="trayShortcutHint">You can reopen Settings with Command+,.</p>
+        </div>
+      </div>
+    </section>
+    <section>
+      <h2>Keyboard shortcuts</h2>
       <div class="setting">
         <label for="openApp">Open app</label>
         <input id="openApp" readonly />
@@ -588,8 +702,8 @@ function getSettingsWindowHtml() {
     </section>
     <div id="status" role="status"></div>
     <div class="actions">
-      <button id="reset">Reset</button>
-      <button id="save" class="primary">Save</button>
+      <button id="reset">Reset shortcuts</button>
+      <button id="save" class="primary">Save shortcuts</button>
     </div>
   </main>
   <script>
@@ -599,6 +713,8 @@ function getSettingsWindowHtml() {
       temporaryChat: document.getElementById("temporaryChat"),
     };
     const status = document.getElementById("status");
+    const hideTrayIcon = document.getElementById("hideTrayIcon");
+    const trayShortcutHint = document.getElementById("trayShortcutHint");
     let activeField;
 
     function setStatus(message, isError = false) {
@@ -632,9 +748,14 @@ function getSettingsWindowHtml() {
       return parts.length > 1 ? parts.join("+") : "";
     }
 
-    function setShortcuts(payload) {
+    function setSettings(payload) {
       fields.openApp.value = payload.shortcuts.openApp;
       fields.temporaryChat.value = payload.shortcuts.temporaryChat;
+      hideTrayIcon.checked = payload.trayIconHidden;
+      hideTrayIcon.disabled = !payload.settingsShortcutRegistered;
+      trayShortcutHint.textContent = payload.settingsShortcutRegistered
+        ? "You can reopen Settings with " + payload.settingsShortcutLabel + "."
+        : "The Settings shortcut is unavailable, so the tray icon must remain visible.";
     }
 
     for (const button of document.querySelectorAll("[data-record]")) {
@@ -668,17 +789,33 @@ function getSettingsWindowHtml() {
         temporaryChat: fields.temporaryChat.value,
       });
       setStatus(result.ok ? "Saved." : result.error, !result.ok);
-      if (result.ok) setShortcuts(result);
+      if (result.ok) setSettings(result);
     });
 
     document.getElementById("reset").addEventListener("click", async () => {
       const result = await api.resetShortcuts();
       setStatus(result.ok ? "Defaults restored." : result.error, !result.ok);
-      if (result.ok) setShortcuts(result);
+      if (result.ok) setSettings(result);
     });
 
-    api.onShortcutsUpdated(setShortcuts);
-    api.getShortcuts().then(setShortcuts);
+    hideTrayIcon.addEventListener("change", async () => {
+      setStatus("");
+      const result = await api.setTrayIconHidden(hideTrayIcon.checked);
+      setSettings(result);
+      if (!result.ok) {
+        setStatus(result.error, true);
+        return;
+      }
+
+      setStatus(
+        result.trayIconHidden
+          ? "Tray icon hidden. Use " + result.settingsShortcutLabel + " to reopen Settings."
+          : "Tray icon shown.",
+      );
+    });
+
+    api.onShortcutsUpdated(setSettings);
+    api.getShortcuts().then(setSettings);
   </script>
 </body>
 </html>`;
@@ -687,13 +824,14 @@ function getSettingsWindowHtml() {
 function createSettingsWindow() {
   const options: BrowserWindowConstructorOptions = {
     width: 620,
-    height: 390,
+    height: 500,
     title: "Tray ChatGPT Settings",
     resizable: false,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
     show: false,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#1e1e1e" : "#ffffff",
     webPreferences: {
       preload: path.join(__dirname, "settings-preload.js"),
       nodeIntegration: false,
@@ -703,11 +841,32 @@ function createSettingsWindow() {
     },
   };
   const win = new BrowserWindow(options);
+  settingsWindowReady = false;
+  win.once("ready-to-show", () => {
+    if (isQuitting || settingsWindow !== win || win.isDestroyed()) return;
+
+    settingsWindowReady = true;
+    if (settingsWindowShouldShow) presentSettingsWindow(win);
+  });
+  win.on("close", (event) => {
+    if (isQuitting) return;
+
+    event.preventDefault();
+    settingsWindowShouldShow = false;
+    win.hide();
+  });
+  win.on("hide", () => {
+    if (process.platform === "darwin" && !mainWindow.isVisible()) {
+      app.dock.hide();
+    }
+  });
   win.loadURL(
     `data:text/html;charset=utf-8,${encodeURIComponent(getSettingsWindowHtml())}`,
   );
   win.on("closed", () => {
     settingsWindow = undefined;
+    settingsWindowReady = false;
+    settingsWindowShouldShow = false;
     if (process.platform === "darwin" && !mainWindow.isVisible()) {
       app.dock.hide();
     }
@@ -715,15 +874,22 @@ function createSettingsWindow() {
   return win;
 }
 
+function presentSettingsWindow(win: BrowserWindow) {
+  if (process.platform === "darwin") app.dock.show();
+  updateSettingsWindowShortcuts();
+  win.show();
+  win.focus();
+}
+
 function showSettingsWindow() {
+  settingsWindowShouldShow = true;
   if (!settingsWindow || settingsWindow.isDestroyed()) {
     settingsWindow = createSettingsWindow();
+    return;
   }
 
-  if (process.platform === "darwin") app.dock.show();
-  settingsWindow.show();
-  settingsWindow.focus();
-  updateSettingsWindowShortcuts();
+  if (!settingsWindowReady) return;
+  presentSettingsWindow(settingsWindow);
 }
 
 /* ──────────────────────────────────────────────
@@ -733,13 +899,31 @@ app.commandLine.appendSwitch("enable-features", "WebSpeechAPI");
 
 app.whenReady().then(async () => {
   await checkMicrophonePermission();
-  await loadShortcutConfig();
+  await Promise.all([loadShortcutConfig(), loadTrayIconSetting()]);
 
   // (Optional) external Google login — can be commented out if not needed
   // await ensureGoogleLogged();
 
-  tray = createTray();
-  mainWindow = createMainWindow(tray);
+  mainWindow = createMainWindow();
+  settingsWindow = createSettingsWindow();
+  settingsShortcutRegistered = globalShortcut.register(
+    SETTINGS_WINDOW_SHORTCUT,
+    showSettingsWindow,
+  );
+  if (!settingsShortcutRegistered) {
+    console.error(
+      `Unable to register Settings shortcut: ${SETTINGS_WINDOW_SHORTCUT}`,
+    );
+    if (trayIconHidden) {
+      trayIconHidden = false;
+      try {
+        await settings.set(TRAY_ICON_HIDDEN_SETTINGS_KEY, false);
+      } catch (error) {
+        console.error("Unable to restore the tray icon preference:", error);
+      }
+    }
+  }
+  updateTrayIconVisibility();
 
   // after creating mainWindow:
   const CHROME_UA =
@@ -917,6 +1101,14 @@ ipcMain.handle(
       };
     }
 
+    if (conflictsWithSettingsShortcut(nextConfig)) {
+      return {
+        ok: false,
+        error: `${SETTINGS_WINDOW_SHORTCUT_LABEL} is reserved for opening Settings.`,
+        ...getShortcutSettingsPayload(),
+      };
+    }
+
     const previousConfig = shortcutConfig;
     if (
       nextConfig.openApp !== previousConfig.openApp &&
@@ -977,6 +1169,41 @@ ipcMain.handle(SETTINGS_CHANNEL_RESET, async () => {
   return { ok: true, ...getShortcutSettingsPayload() };
 });
 
+ipcMain.handle(
+  SETTINGS_CHANNEL_SET_TRAY_ICON_HIDDEN,
+  async (_event: IpcMainInvokeEvent, value: unknown) => {
+    if (typeof value !== "boolean") {
+      return {
+        ok: false,
+        error: "Tray icon visibility must be a boolean value.",
+        ...getShortcutSettingsPayload(),
+      };
+    }
+
+    if (value && !settingsShortcutRegistered) {
+      return {
+        ok: false,
+        error: `${SETTINGS_WINDOW_SHORTCUT_LABEL} is unavailable, so the tray icon cannot be hidden safely.`,
+        ...getShortcutSettingsPayload(),
+      };
+    }
+
+    try {
+      await saveTrayIconHidden(value);
+      return { ok: true, ...getShortcutSettingsPayload() };
+    } catch (error) {
+      return {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not update tray icon visibility.",
+        ...getShortcutSettingsPayload(),
+      };
+    }
+  },
+);
+
 ipcMain.on(DRAG_CHANNEL_START, () => {
   if (!mainWindow?.isVisible()) return;
 
@@ -999,6 +1226,9 @@ ipcMain.on(DRAG_CHANNEL_END, () => {
   dragState = undefined;
 });
 
+app.on("before-quit", () => {
+  isQuitting = true;
+});
 app.on("will-quit", () => globalShortcut.unregisterAll());
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
