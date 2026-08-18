@@ -97,6 +97,9 @@ let settingsShortcutRegistered = false;
 let isQuitting = false;
 let toggleTemporaryChatHandler: (() => void | Promise<void>) | undefined;
 let resetWorkspaceVisibilityTimer: ReturnType<typeof setTimeout> | undefined;
+let resetSettingsWorkspaceVisibilityTimer:
+  | ReturnType<typeof setTimeout>
+  | undefined;
 let dragState:
   | {
       cursorX: number;
@@ -1642,6 +1645,13 @@ function createSettingsWindow() {
 
     event.preventDefault();
     settingsWindowShouldShow = false;
+    clearSettingsWorkspaceVisibilityReset();
+    if (process.platform === "darwin") {
+      win.setVisibleOnAllWorkspaces(
+        false,
+        VISIBLE_ON_CURRENT_SPACE_OPTIONS,
+      );
+    }
     win.hide();
   });
   win.on("hide", () => {
@@ -1653,6 +1663,7 @@ function createSettingsWindow() {
     `data:text/html;charset=utf-8,${encodeURIComponent(getSettingsWindowHtml())}`,
   );
   win.on("closed", () => {
+    clearSettingsWorkspaceVisibilityReset();
     settingsWindow = undefined;
     settingsWindowReady = false;
     settingsWindowShouldShow = false;
@@ -1663,11 +1674,34 @@ function createSettingsWindow() {
   return win;
 }
 
+function clearSettingsWorkspaceVisibilityReset() {
+  if (!resetSettingsWorkspaceVisibilityTimer) return;
+
+  clearTimeout(resetSettingsWorkspaceVisibilityTimer);
+  resetSettingsWorkspaceVisibilityTimer = undefined;
+}
+
 function presentSettingsWindow(win: BrowserWindow) {
-  if (process.platform === "darwin") app.dock.show();
+  if (process.platform === "darwin") {
+    clearSettingsWorkspaceVisibilityReset();
+    app.dock.show();
+    win.setVisibleOnAllWorkspaces(true, VISIBLE_ON_CURRENT_SPACE_OPTIONS);
+  }
   updateSettingsWindowShortcuts();
   win.show();
   win.focus();
+
+  if (process.platform !== "darwin") return;
+
+  resetSettingsWorkspaceVisibilityTimer = setTimeout(() => {
+    resetSettingsWorkspaceVisibilityTimer = undefined;
+    if (win.isDestroyed()) return;
+
+    win.setVisibleOnAllWorkspaces(
+      false,
+      VISIBLE_ON_CURRENT_SPACE_OPTIONS,
+    );
+  }, 100);
 }
 
 function showSettingsWindow() {
