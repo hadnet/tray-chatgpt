@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.3.1](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.3.0...tray-chatgpt-app-v3.3.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* ensure settings window workspace visibility resets correctly on macOS ([2987a98](https://github.com/hadnet/tray-chatgpt/commit/2987a98b763907f5c69504c5047363fe18ddf432))
+
 ## [3.3.0](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.2.2...tray-chatgpt-app-v3.3.0) (2026-08-18)
 
 
