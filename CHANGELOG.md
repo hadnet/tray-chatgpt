@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.4.0](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.3.1...tray-chatgpt-app-v3.4.0) (2026-09-24)
+
+
+### Features
+
+* automatically copy new macOS screenshots to clipboard ([816d8f5](https://github.com/hadnet/tray-chatgpt/commit/816d8f5f5452771cf353a0aa5b6899f670bbab7a))
+
 ## [3.3.1](https://github.com/hadnet/tray-chatgpt/compare/tray-chatgpt-app-v3.3.0...tray-chatgpt-app-v3.3.1) (2026-08-18)
 
 
