@@ -10,6 +10,8 @@ const SETTINGS_CHANNEL_SAVE_PROMPT_TEMPLATES =
 const SETTINGS_CHANNEL_UPDATED = "settings:shortcuts-updated";
 
 contextBridge.exposeInMainWorld("trayChatGPTSettings", {
+  setAutoCopyScreenshots: (enabled) =>
+    ipcRenderer.invoke("settings:set-auto-copy-screenshots", enabled),
   getShortcuts: () => ipcRenderer.invoke(SETTINGS_CHANNEL_GET),
   saveShortcuts: (shortcuts) =>
     ipcRenderer.invoke(SETTINGS_CHANNEL_SAVE, shortcuts),

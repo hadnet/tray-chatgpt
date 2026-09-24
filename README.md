@@ -22,6 +22,21 @@ This is a simple desktop app tray for [ChatGPT](https://chat.openai.com/chat).
 The system tray icon can be hidden from Settings. The Settings shortcut remains
 available while the icon is hidden so it can be turned back on at any time.
 
+### Screenshot clipboard (macOS)
+
+New screenshots saved by the macOS screenshot tool are automatically copied to
+the clipboard while Tray ChatGPT is running. Press `Command+V` to paste into
+ChatGPT or another app. Turn this off in **Settings → General → Screenshots**.
+This replaces your current clipboard contents, but never sends or pastes an image
+without your action.
+
+The app follows the macOS screenshot save location, including custom folders.
+Allow access to that folder if macOS asks. Existing screenshots are ignored.
+Copying happens after the screenshot is saved and stable, so the floating macOS
+thumbnail may delay it. Screenshots sent directly to the clipboard already work
+without this feature. Third-party screenshot tools and screen recordings are not
+monitored. If you save screenshots as PDF, choose an image format instead.
+
 ### Prompt Templates
 
 Settings also supports reusable prompt templates. Each template contains text and

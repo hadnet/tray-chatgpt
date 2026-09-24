@@ -16,6 +16,7 @@ import {
   systemPreferences,
 } from "electron";
 import { execFile } from "child_process";
+import { watchScreenshots } from "./screenshot-watcher";
 import * as path from "path";
 import * as settings from "electron-settings";
 import * as os from "os";
@@ -93,6 +94,31 @@ let promptTemplates: PromptTemplate[] = [];
 const registeredPromptShortcuts = new Set<string>();
 let promptShortcutRegistrationErrors = new Set<string>();
 let trayIconHidden = false;
+let autoCopyScreenshots = false;
+let screenshotError = "";
+let stopScreenshotWatcher: (() => void) | undefined;
+
+function updateScreenshotWatcher() {
+  stopScreenshotWatcher?.();
+  stopScreenshotWatcher = undefined;
+  screenshotError = "";
+  if (!autoCopyScreenshots || process.platform !== "darwin") return;
+  stopScreenshotWatcher = watchScreenshots({
+    desktop: app.getPath("desktop"),
+    home: app.getPath("home"),
+    copy: (file) => {
+      const image = nativeImage.createFromPath(file);
+      if (image.isEmpty()) return false;
+      clipboard.writeImage(image);
+      return true;
+    },
+    onError: (message) => {
+      if (screenshotError === message) return;
+      screenshotError = message;
+      updateSettingsWindowShortcuts();
+    },
+  });
+}
 let settingsShortcutRegistered = false;
 let isQuitting = false;
 let toggleTemporaryChatHandler: (() => void | Promise<void>) | undefined;
@@ -492,6 +518,8 @@ function getShortcutSettingsPayload() {
     shortcuts: shortcutConfig,
     defaults: SHORTCUT_DEFAULTS,
     trayIconHidden,
+    autoCopyScreenshots,
+    screenshotError,
     settingsShortcut: SETTINGS_WINDOW_SHORTCUT,
     settingsShortcutLabel: SETTINGS_WINDOW_SHORTCUT_LABEL,
     settingsShortcutRegistered,
@@ -1143,6 +1171,18 @@ function getSettingsWindowHtml() {
           </div>
         </div>
 
+        <div id="screenshotSettings" class="settings-group">
+          <div class="group-heading"><h2>Screenshots</h2></div>
+          <div class="toggle-setting">
+            <input id="autoCopyScreenshots" type="checkbox" />
+            <div>
+              <label for="autoCopyScreenshots">Automatically copy new screenshots</label>
+              <p class="hint">New screenshots saved by macOS replace your clipboard. Paste with ⌘V. Existing screenshots are ignored.</p>
+              <p id="screenshotError" class="hint" role="status"></p>
+            </div>
+          </div>
+        </div>
+
         <div class="settings-group">
           <div class="group-heading"><h2>Keyboard shortcuts</h2></div>
           <div class="setting">
@@ -1230,6 +1270,7 @@ function getSettingsWindowHtml() {
     );
     const generalStatus = document.getElementById("generalStatus");
     const templateStatus = document.getElementById("templateStatus");
+    const autoCopyScreenshots = document.getElementById("autoCopyScreenshots");
     const hideTrayIcon = document.getElementById("hideTrayIcon");
     const trayShortcutHint = document.getElementById("trayShortcutHint");
     const templatePermissionHint = document.getElementById("templatePermissionHint");
@@ -1462,6 +1503,9 @@ function getSettingsWindowHtml() {
 
     function setSettings(payload, forceTemplates = false) {
       currentPlatform = payload.platform;
+      document.getElementById("screenshotSettings").hidden = payload.platform !== "darwin";
+      autoCopyScreenshots.checked = payload.autoCopyScreenshots;
+      document.getElementById("screenshotError").textContent = payload.screenshotError;
       fields.openApp.value = payload.shortcuts.openApp;
       fields.temporaryChat.value = payload.shortcuts.temporaryChat;
       renderShortcut(shortcutDisplays.openApp, payload.shortcuts.openApp);
@@ -1566,6 +1610,20 @@ function getSettingsWindowHtml() {
         !result.ok,
       );
       if (result.ok) setSettings(result, false);
+    });
+
+    autoCopyScreenshots.addEventListener("change", async () => {
+      autoCopyScreenshots.disabled = true;
+      try {
+        const result = await api.setAutoCopyScreenshots(autoCopyScreenshots.checked);
+        setSettings(result, false);
+        setStatus(generalStatus, result.ok ? "Saved." : result.error, !result.ok);
+      } catch {
+        autoCopyScreenshots.checked = !autoCopyScreenshots.checked;
+        setStatus(generalStatus, "Could not save screenshot setting.", true);
+      } finally {
+        autoCopyScreenshots.disabled = false;
+      }
     });
 
     hideTrayIcon.addEventListener("change", async () => {
@@ -1724,6 +1782,9 @@ app.whenReady().then(async () => {
   await checkMicrophonePermission();
   await Promise.all([loadShortcutConfig(), loadTrayIconSetting()]);
   await loadPromptTemplates();
+  const savedAutoCopy: unknown = await settings.get("autoCopyScreenshots");
+  autoCopyScreenshots = process.platform === "darwin" && savedAutoCopy !== false;
+  updateScreenshotWatcher();
 
   // (Optional) external Google login — can be commented out if not needed
   // await ensureGoogleLogged();
@@ -2088,6 +2149,36 @@ ipcMain.handle(
   },
 );
 
+ipcMain.handle(
+  "settings:set-auto-copy-screenshots",
+  async (event: IpcMainInvokeEvent, value: unknown) => {
+    if (
+      event.sender !== settingsWindow?.webContents ||
+      event.senderFrame !== settingsWindow.webContents.mainFrame
+    ) {
+      throw new Error("Screenshot settings can only be changed from Settings.");
+    }
+    try {
+      if (typeof value !== "boolean" || process.platform !== "darwin") {
+        throw new Error("Screenshot copying requires macOS and a boolean setting.");
+      }
+      await settings.set("autoCopyScreenshots", value);
+      autoCopyScreenshots = value;
+      updateScreenshotWatcher();
+      updateSettingsWindowShortcuts();
+      return { ok: true, ...getShortcutSettingsPayload() };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error
+          ? error.message
+          : "Could not save screenshot setting.",
+        ...getShortcutSettingsPayload(),
+      };
+    }
+  },
+);
+
 ipcMain.on(DRAG_CHANNEL_START, () => {
   if (!mainWindow?.isVisible()) return;
 
@@ -2112,6 +2203,7 @@ ipcMain.on(DRAG_CHANNEL_END, () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  stopScreenshotWatcher?.();
 });
 app.on("will-quit", () => globalShortcut.unregisterAll());
 app.on("window-all-closed", () => {
